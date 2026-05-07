@@ -1,6 +1,7 @@
 use anda_core::{BoxError, StateFeatures, ToolOutput};
 use async_trait::async_trait;
 use ic_auth_types::Xid;
+use serde_json::json;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -9,7 +10,10 @@ use std::{
 };
 
 use super::{ExecArgs, ExecOutput, Executor, ShellToolHook, join_current_dir};
-use crate::{context::BaseCtx, hook::ToolHook};
+use crate::{
+    context::BaseCtx,
+    hook::{DynToolJsonHook, ToolBackgroundHook, ToolHook},
+};
 
 /// Native runtime — full access, runs on Mac/Linux/Docker/Raspberry Pi
 pub struct NativeRuntime {
@@ -127,7 +131,11 @@ impl Executor for NativeRuntime {
         let task_id = format!("{}:{}", self.name(), Xid::new());
         let temp_dir = self.temp_dir();
         let exec_output = ExecOutput::from_output(pid, None, temp_dir).await;
-        if let Some(hook) = &hook {
+        let json_hook = ctx.get_state::<DynToolJsonHook>();
+        if let Some(hook) = &json_hook {
+            hook.on_background_start(&ctx, &task_id, json!(&input))
+                .await;
+        } else if let Some(hook) = &hook {
             hook.on_background_start(&ctx, &task_id, &input).await;
         }
 
@@ -139,8 +147,15 @@ impl Executor for NativeRuntime {
                         let mut exec_output =
                             ExecOutput::from_output(pid, Some(output), &temp_dir).await;
                         exec_output.workspace = Some(workspace_str);
-                        if let Some(hook) = &hook {
-                            hook.on_background_end(ctx, task_id, ToolOutput::new(exec_output))
+                        if let Some(hook) = &json_hook {
+                            hook.on_background_end(
+                                &ctx,
+                                task_id,
+                                ToolOutput::new(json!(exec_output)),
+                            )
+                            .await;
+                        } else if let Some(hook) = &hook {
+                            hook.on_background_end(&ctx, task_id, ToolOutput::new(exec_output))
                                 .await;
                         }
                     }
@@ -151,8 +166,15 @@ impl Executor for NativeRuntime {
                             stderr: Some(format!("Failed to execute background process: {err}")),
                             ..Default::default()
                         };
-                        if let Some(hook) = &hook {
-                            hook.on_background_end(ctx, task_id, ToolOutput::new(exec_output))
+                        if let Some(hook) = &json_hook {
+                            hook.on_background_end(
+                                &ctx,
+                                task_id,
+                                ToolOutput::new(json!(exec_output)),
+                            )
+                            .await;
+                        } else if let Some(hook) = &hook {
+                            hook.on_background_end(&ctx, task_id, ToolOutput::new(exec_output))
                                 .await;
                         }
                     }
@@ -219,7 +241,7 @@ mod tests {
     impl ToolHook<ExecArgs, ExecOutput> for TestHook {
         async fn on_background_end(
             &self,
-            _ctx: BaseCtx,
+            _ctx: &BaseCtx,
             task_id: String,
             output: ToolOutput<ExecOutput>,
         ) {

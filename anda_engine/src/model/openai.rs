@@ -183,6 +183,7 @@ impl CompletionResponse {
             msg.name = Some(self.model);
             msg.timestamp = Some(timestamp);
             output.content = msg.text().unwrap_or_default();
+            output.thoughts = msg.thoughts();
             output.tool_calls = msg.tool_calls();
             output.chat_history.push(msg);
         }

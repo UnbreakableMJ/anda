@@ -804,8 +804,8 @@ mod tests {
             names,
             vec![
                 "echo_tool",
-                "subagents_manager",
                 "echo_agent",
+                "subagents_manager",
                 "tools_search",
                 "tools_select"
             ]

@@ -562,6 +562,7 @@ impl CreateMessageResponse {
                 | Some(StopReason::StopSequence)
                 | Some(StopReason::ToolUse) => {
                     output.content = msg.text().unwrap_or_default();
+                    output.thoughts = msg.thoughts();
                     output.tool_calls = msg.tool_calls();
                 }
                 v => {

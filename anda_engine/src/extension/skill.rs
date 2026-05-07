@@ -28,10 +28,11 @@ use std::{
 };
 
 use crate::{
-    context::{BaseCtx, SubAgent, SubAgentSet},
+    context::BaseCtx,
     extension::fs::{
         atomic_write_file, ensure_file_size_within_limit, ensure_regular_file, resolve_write_path,
     },
+    subagent::{SubAgent, SubAgentSet},
 };
 
 mod types;
@@ -1024,10 +1025,7 @@ impl Tool<BaseCtx> for SkillManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        context::{BaseCtx, SubAgentSet},
-        engine::EngineBuilder,
-    };
+    use crate::{context::BaseCtx, engine::EngineBuilder, subagent::SubAgentSet};
     use std::sync::Arc;
 
     fn mock_ctx() -> BaseCtx {

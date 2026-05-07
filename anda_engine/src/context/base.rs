@@ -133,6 +133,9 @@ impl BaseCtx {
     pub(crate) fn child(&self, mut path: String) -> Result<Self, BoxError> {
         path.make_ascii_lowercase();
         let path = Path::parse(path)?;
+        let mut state = Extensions::default();
+        // Inherit state from parent context. Each context has its own state, but they are initialized with the parent's state.
+        state.extend(self.state.read().clone());
         let child = Self {
             id: self.id,
             name: self.name.clone(),
@@ -146,7 +149,7 @@ impl BaseCtx {
             web3: self.web3.clone(),
             depth: self.depth + 1,
             remote: self.remote.clone(),
-            state: self.state.clone(),
+            state: Arc::new(RwLock::new(state)),
             meta: self.meta.clone(),
         };
 
@@ -191,7 +194,7 @@ impl BaseCtx {
             web3: self.web3.clone(),
             depth: self.depth + 1,
             remote: self.remote.clone(),
-            state: self.state.clone(),
+            state: Arc::new(RwLock::new(Extensions::default())),
             meta,
         };
 

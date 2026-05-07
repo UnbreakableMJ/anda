@@ -66,14 +66,12 @@ use structured_logger::unix_ms;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFuture};
 
 use crate::{
-    context::{
-        AgentCtx, BaseCtx, SubAgentManager, SubAgentSetManager, ToolsSearch, ToolsSelect,
-        Web3Client, Web3SDK,
-    },
+    context::{AgentCtx, BaseCtx, ToolsSearch, ToolsSelect, Web3Client, Web3SDK},
     hook::{Hook, Hooks},
     management::{BaseManagement, Management, SYSTEM_PATH, Visibility},
     model::{Model, Models},
     store::Store,
+    subagent::{SubAgentManager, SubAgentSetManager},
 };
 
 pub use crate::context::{AgentInfo, EngineCard, RemoteEngineArgs, RemoteEngines};
@@ -439,10 +437,9 @@ impl EngineBuilder {
         let subagents = SubAgentSetManager::new();
         subagents.insert(subagent_manager.clone());
 
-        let mut tools = ToolSet::new();
-        tools.add(subagent_manager).unwrap();
-
+        let tools = ToolSet::new();
         let mut agents = AgentSet::new();
+        agents.add(subagent_manager, None).unwrap();
         agents
             .add(Arc::new(ToolsSearch::new()), Some("flash".to_string()))
             .unwrap();

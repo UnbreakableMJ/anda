@@ -35,6 +35,7 @@ pub mod management;
 pub mod memory;
 pub mod model;
 pub mod store;
+pub mod subagent;
 
 /// Returns the current Unix timestamp in milliseconds.
 pub use structured_logger::unix_ms;

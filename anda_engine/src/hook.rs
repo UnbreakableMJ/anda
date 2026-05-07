@@ -11,10 +11,48 @@ use anda_core::{
     StateFeatures, ToolOutput,
 };
 use async_trait::async_trait;
+use core::{fmt, str::FromStr};
 use std::{sync::Arc, time::Duration};
 use structured_logger::unix_ms;
 
 use crate::context::{AgentCtx, BaseCtx};
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PrefixedId {
+    pub prefix: String,
+    pub id: String,
+}
+
+impl fmt::Display for PrefixedId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.prefix, self.id)
+    }
+}
+
+impl FromStr for PrefixedId {
+    type Err = BoxError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid PrefixedId format: {}", s).into());
+        }
+        if parts[0].trim().is_empty() || parts[1].trim().is_empty() {
+            return Err(format!("Prefix and ID cannot be empty: {}", s).into());
+        }
+        if parts[0].trim() != parts[0] || parts[1].trim() != parts[1] {
+            return Err(format!(
+                "Prefix and ID cannot have leading or trailing whitespace: {}",
+                s
+            )
+            .into());
+        }
+        Ok(Self {
+            prefix: parts[0].to_string(),
+            id: parts[1].to_string(),
+        })
+    }
+}
 
 /// Engine-level hook for agent runs and direct tool calls.
 ///
@@ -81,8 +119,36 @@ where
     /// Called when a tool starts a background task.
     async fn on_background_start(&self, _ctx: &BaseCtx, _task_id: &str, _args: &I) {}
 
+    /// Called when a tool reports progress from a background task.
+    async fn on_background_progress(
+        &self,
+        _ctx: &BaseCtx,
+        _task_id: String,
+        _output: ToolOutput<O>,
+    ) {
+    }
+
     /// Called with the final output from a background tool task.
-    async fn on_background_end(&self, _ctx: BaseCtx, _task_id: String, _output: ToolOutput<O>) {}
+    async fn on_background_end(&self, _ctx: &BaseCtx, _task_id: String, _output: ToolOutput<O>) {}
+}
+
+#[async_trait]
+pub trait ToolBackgroundHook: Send + Sync {
+    /// Called when a tool starts a background task.
+    async fn on_background_start(&self, _ctx: &BaseCtx, _task_id: &str, _args: Json) {}
+
+    /// Called when a tool reports progress from a background task.
+    async fn on_background_progress(
+        &self,
+        _ctx: &BaseCtx,
+        _task_id: String,
+        _output: ToolOutput<Json>,
+    ) {
+    }
+
+    /// Called with the final output from a background tool task.
+    async fn on_background_end(&self, _ctx: &BaseCtx, _task_id: String, _output: ToolOutput<Json>) {
+    }
 }
 
 /// Cloneable type-erased wrapper for a typed [`ToolHook`].
@@ -124,7 +190,47 @@ where
         self.inner.on_background_start(ctx, task_id, args).await;
     }
 
-    async fn on_background_end(&self, ctx: BaseCtx, task_id: String, output: ToolOutput<O>) {
+    async fn on_background_progress(&self, ctx: &BaseCtx, task_id: String, _output: ToolOutput<O>) {
+        self.inner
+            .on_background_progress(ctx, task_id, _output)
+            .await;
+    }
+
+    async fn on_background_end(&self, ctx: &BaseCtx, task_id: String, output: ToolOutput<O>) {
+        self.inner.on_background_end(ctx, task_id, output).await;
+    }
+}
+
+#[derive(Clone)]
+pub struct DynToolJsonHook {
+    inner: Arc<dyn ToolBackgroundHook>,
+}
+
+impl DynToolJsonHook {
+    /// Wraps a concrete hook implementation.
+    pub fn new(inner: Arc<dyn ToolBackgroundHook>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl ToolBackgroundHook for DynToolJsonHook {
+    async fn on_background_start(&self, ctx: &BaseCtx, task_id: &str, args: Json) {
+        self.inner.on_background_start(ctx, task_id, args).await;
+    }
+
+    async fn on_background_progress(
+        &self,
+        ctx: &BaseCtx,
+        task_id: String,
+        _output: ToolOutput<Json>,
+    ) {
+        self.inner
+            .on_background_progress(ctx, task_id, _output)
+            .await;
+    }
+
+    async fn on_background_end(&self, ctx: &BaseCtx, task_id: String, output: ToolOutput<Json>) {
         self.inner.on_background_end(ctx, task_id, output).await;
     }
 }
@@ -154,12 +260,26 @@ pub trait AgentHook: Send + Sync {
         Ok(output)
     }
 
-    /// Called when an agent starts a background task.
-    async fn on_background_start(&self, _ctx: &AgentCtx, _task_id: &str, _req: &CompletionRequest) {
+    /// Called when an agent starts in the background. The session ID can be used to correlate progress and final output hooks.
+    async fn on_background_start(
+        &self,
+        _ctx: &AgentCtx,
+        _session_id: &str,
+        _req: &CompletionRequest,
+    ) {
+    }
+
+    /// Called when an agent reports progress from a background task.
+    async fn on_background_progress(
+        &self,
+        _ctx: &AgentCtx,
+        _session_id: String,
+        _progress: AgentOutput,
+    ) {
     }
 
     /// Called with the final output from a background agent task.
-    async fn on_background_end(&self, _ctx: AgentCtx, _task_id: String, _output: AgentOutput) {}
+    async fn on_background_end(&self, _ctx: &AgentCtx, _session_id: String, _output: AgentOutput) {}
 }
 
 /// Cloneable type-erased wrapper for an [`AgentHook`].
@@ -194,12 +314,23 @@ impl AgentHook for DynAgentHook {
         self.inner.after_agent_run(ctx, output).await
     }
 
-    async fn on_background_start(&self, ctx: &AgentCtx, task_id: &str, req: &CompletionRequest) {
-        self.inner.on_background_start(ctx, task_id, req).await;
+    async fn on_background_start(&self, ctx: &AgentCtx, session_id: &str, req: &CompletionRequest) {
+        self.inner.on_background_start(ctx, session_id, req).await;
     }
 
-    async fn on_background_end(&self, ctx: AgentCtx, task_id: String, output: AgentOutput) {
-        self.inner.on_background_end(ctx, task_id, output).await;
+    async fn on_background_progress(
+        &self,
+        ctx: &AgentCtx,
+        session_id: String,
+        progress: AgentOutput,
+    ) {
+        self.inner
+            .on_background_progress(ctx, session_id, progress)
+            .await;
+    }
+
+    async fn on_background_end(&self, ctx: &AgentCtx, session_id: String, output: AgentOutput) {
+        self.inner.on_background_end(ctx, session_id, output).await;
     }
 }
 

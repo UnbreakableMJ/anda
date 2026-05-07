@@ -10,14 +10,12 @@ mod agent;
 mod base;
 mod cache;
 mod engine;
-mod subagent;
 mod tool;
 mod web3;
 
 pub use agent::*;
 pub use base::*;
 pub use engine::*;
-pub use subagent::*;
 pub use tool::*;
 pub use web3::*;
 

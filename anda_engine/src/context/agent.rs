@@ -49,10 +49,12 @@ use std::{
 use super::{
     base::BaseCtx,
     engine::RemoteEngines,
-    subagent::{SubAgentSet, SubAgentSetManager},
     tool::{ToolsSelectOutput, is_tools_select_name},
 };
-use crate::model::{Model, Models};
+use crate::{
+    model::{Model, Models},
+    subagent::{SubAgentSet, SubAgentSetManager},
+};
 
 pub static DYNAMIC_REMOTE_ENGINES: &str = "_engines";
 pub static REMOTE_AGENT_PREFIX: &str = "RA_";
@@ -1012,6 +1014,11 @@ impl CompletionRunner {
         }
     }
 
+    /// Appends messages to the chat history.
+    pub fn append_chat_history(&mut self, messages: Vec<Message>) {
+        self.chat_history.extend(messages);
+    }
+
     /// Returns whether the completion has finished.
     pub fn is_done(&self) -> bool {
         self.done
@@ -1020,6 +1027,25 @@ impl CompletionRunner {
     /// Returns the number of turns executed.
     pub fn turns(&self) -> usize {
         self.turns
+    }
+
+    pub fn ctx(&self) -> &AgentCtx {
+        &self.ctx
+    }
+
+    /// Get the original completion request.
+    pub fn req(&self) -> &CompletionRequest {
+        &self.req
+    }
+
+    /// Get the model used for this completion.
+    pub fn model(&self) -> &Model {
+        &self.model
+    }
+
+    /// Returns the chat history of the completion so far.
+    pub fn chat_history(&self) -> &Vec<Message> {
+        &self.chat_history
     }
 
     /// Get the total usage accumulated so far, including all intermediate steps.
@@ -1037,13 +1063,8 @@ impl CompletionRunner {
         &self.tools_usage
     }
 
-    /// Returns the chat history of the completion so far.
-    pub fn chat_history(&self) -> &Vec<Message> {
-        &self.chat_history
-    }
-
-    pub fn model(&self) -> &Model {
-        &self.model
+    pub fn last_output(&self) -> Option<&AgentOutput> {
+        self.last_output.as_ref()
     }
 
     /// Enables or disables unbound mode.
@@ -1079,6 +1100,16 @@ impl CompletionRunner {
         self.total_usage.accumulate(other);
     }
 
+    /// Accumulate tool usage from an intermediate step into the runner's total tools usage.
+    pub fn accumulate_tools_usage(&mut self, other: &HashMap<String, Usage>) {
+        for (tool, usage) in other.iter() {
+            self.tools_usage
+                .entry(tool.clone())
+                .or_default()
+                .accumulate(usage);
+        }
+    }
+
     // Drains all queued steering messages into a single user turn. When steering exists, queued
     // follow-up messages are prepended so the next round sees one combined instruction.
     fn drain_steering_message(&mut self) -> Option<String> {
@@ -1106,14 +1137,6 @@ impl CompletionRunner {
     fn set_next_user_prompt(&mut self, prompt: String) {
         self.req.prompt = prompt;
         self.req.role = Some("user".to_string());
-    }
-
-    fn intermediate_output(&mut self, mut output: AgentOutput) -> AgentOutput {
-        output.usage = self.total_usage.clone();
-        output.tools_usage = self.tools_usage.clone();
-        output.chat_history = self.chat_history.clone();
-        self.last_output = Some(output.clone());
-        output
     }
 
     /// Execute the next step.
@@ -1269,23 +1292,8 @@ impl CompletionRunner {
                             match ctx.agent_run(input).await {
                                 Ok((res, remote_id)) => {
                                     tool.remote_id = remote_id;
-                                    tool.result = Some(ToolOutput {
-                                        output: if (res.content.trim().starts_with("{")
-                                            || res.content.trim().starts_with("["))
-                                            && let Ok(val) = serde_json::from_str(&res.content)
-                                        {
-                                            val
-                                        } else {
-                                            res.content.into()
-                                        },
-                                        artifacts: res.artifacts,
-                                        usage: res.usage,
-                                    });
-                                    if let Some(reason) = res.failed_reason {
-                                        (Some(tool), Some(reason))
-                                    } else {
-                                        (Some(tool), None)
-                                    }
+                                    tool.result = Some(res.into_tool_output());
+                                    (Some(tool), None)
                                 }
                                 Err(err) => (None, Some(err.to_string())),
                             }
@@ -1322,12 +1330,16 @@ impl CompletionRunner {
                                 .entry(tool.name.to_ascii_lowercase())
                                 .and_modify(|u| u.accumulate(&usage))
                                 .or_insert(usage);
+                            self.accumulate_tools_usage(&res.tools_usage);
                             self.accumulate(&res.usage);
                             if is_tools_select_name(&tool.name) {
                                 // 从模型输出或工具调用结果中获取实际被选中的工具定义，传递给下一轮模型调用
-                                if let Ok(selected) =
-                                    serde_json::from_value::<ToolsSelectOutput>(res.output.clone())
-                                {
+                                if let Ok(selected) = serde_json::from_value::<ToolsSelectOutput>(
+                                    res.output
+                                        .get("content")
+                                        .cloned()
+                                        .unwrap_or(res.output.clone()),
+                                ) {
                                     // 仅把选中的工具名称反馈给模型
                                     res.output = json!(
                                         selected
@@ -1469,6 +1481,14 @@ impl CompletionRunner {
         }
 
         Ok(Some(self.final_output(output)))
+    }
+
+    fn intermediate_output(&mut self, mut output: AgentOutput) -> AgentOutput {
+        output.usage = self.total_usage.clone();
+        output.tools_usage = self.tools_usage.clone();
+        output.chat_history = self.chat_history.clone();
+        self.last_output = Some(output.clone());
+        output
     }
 
     fn final_idle_output(&mut self) -> AgentOutput {
@@ -2026,13 +2046,13 @@ mod tests {
         ) -> Result<ToolOutput<String>, BoxError> {
             Ok(ToolOutput {
                 output: format!("echoed:{}", args.input),
-                artifacts: Vec::new(),
                 usage: Usage {
                     input_tokens: 0,
                     output_tokens: 0,
                     cached_tokens: 0,
                     requests: 1,
                 },
+                ..Default::default()
             })
         }
     }
@@ -3216,7 +3236,7 @@ mod tests {
                         tags: vec!["test_artifact".to_string()],
                         ..Default::default()
                     }],
-                    usage: Usage::default(),
+                    ..Default::default()
                 })
             }
         }

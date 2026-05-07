@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::context::SubAgent;
+use crate::subagent::SubAgent;
 
 // ---------------------------------------------------------------------------
 // SKILL.md frontmatter — Agent Skills specification

@@ -424,6 +424,7 @@ impl Tool<BaseCtx> for ShellTool {
         } else {
             args
         };
+
         let command = args.command.clone();
         let envs = self.collect_shell_env_vars(&args.env_keys);
 
