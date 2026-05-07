@@ -732,11 +732,6 @@ impl FunctionDefinition {
     }
 }
 
-#[deprecated(note = "Use `estimate_tokens` instead.")]
-pub fn evaluate_tokens(content: &str) -> usize {
-    content.len() / 3
-}
-
 /// Estimates token count using a small, provider-independent heuristic.
 pub fn estimate_tokens(content: &str) -> usize {
     content.len() / 3

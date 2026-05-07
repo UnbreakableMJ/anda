@@ -118,17 +118,6 @@ impl ModelConfig {
         model.max_output = self.max_output;
         Ok(model.with_labels(labels))
     }
-
-    #[deprecated(
-        since = "0.11.22",
-        note = "use the `model` method which returns a Result and allows error handling instead of silently returning a not_implemented model"
-    )]
-    pub fn build_model(&self, http_client: reqwest::Client) -> Model {
-        self.model(http_client).unwrap_or_else(|err| {
-            eprintln!("warning: failed to build model from config: {err}");
-            Model::not_implemented()
-        })
-    }
 }
 
 /// Thread-safe model registry used by the engine.
