@@ -55,7 +55,7 @@ impl ToolsSearch {
 
     pub fn search(&self, candidates: &[FunctionDefinition], args: &ToolsSearchArgs) -> ToolsOutput {
         let normalized_query = args.query.trim().to_lowercase();
-        let tools: Vec<FunctionDefinition> = candidates.iter().cloned().collect();
+        let tools: Vec<FunctionDefinition> = candidates.to_vec();
 
         let total_tools = tools.len();
         if normalized_query == "*" {

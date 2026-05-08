@@ -2,6 +2,28 @@
 
 All notable changes to the Anda project will be documented in this file.
 
+## [0.12.1] — 2026-05-08
+
+### Refactors
+
+- **Unified `ToolsOutput`** — `ToolsSearchOutput` and `ToolsSelectOutput` merged into single `ToolsOutput` struct with `Vec<FunctionDefinition>` (full tool definitions, not just name+description), so the model can invoke tools immediately after `tools_search`. Intermediate `ToolsSearchItem` struct removed; `rank_search_items` returns names directly, definitions resolved at output boundary. Default limits: search 0→10, select 0→5 with explicit `MAX` caps.
+
+### Fixes
+
+- **Agent failures as errors** — when an agent call fails, return a `ToolOutput` error instead of breaking the conversation, allowing the LLM to correct and recover.
+
+### Breaking Changes
+
+- **`workspace` field removed from `ExecArgs`** — shell tool no longer accepts a `workspace` parameter; commands always execute in the runtime's workspace directory. `join_current_dir` helper removed.
+
+### Fixes
+
+- **Shell spawn failures** now return structured `ExecOutput` errors instead of propagating as Rust errors, so the model can see and respond to command execution failures.
+
+### Internal
+
+- **Native shell runtime** renamed from `"native"` to `"native_shell"`; background shell tasks now return an immediate `task_id` output so callers can track long-running commands.
+
 ## [0.12.0] — 2026-05-07
 
 ### Breaking Changes

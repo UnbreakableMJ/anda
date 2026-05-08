@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::HashMap,
-    path::{MAIN_SEPARATOR, Path, PathBuf},
+    path::{Path, PathBuf},
     process::Output,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -109,13 +109,6 @@ pub trait Executor: Send + Sync {
 pub struct ExecArgs {
     /// Shell command to execute.
     pub command: String,
-
-    /// Working directory relative to the runtime workspace.
-    ///
-    /// Absolute paths are normalized under the runtime workspace rather than
-    /// granting access to arbitrary host paths.
-    #[serde(default)]
-    pub workspace: String,
 
     /// Additional custom environment variable keys to expose to the command.
     ///
@@ -374,11 +367,6 @@ impl Tool<BaseCtx> for ShellTool {
                         "type": "string",
                         "description": "The shell command to execute"
                     },
-                    "workspace": {
-                        "type": "string",
-                        "description": "The working directory to execute the command in (relative to runtime storage path)",
-                        "default": ""
-                    },
                     "env_keys": {
                         "type": "array",
                         "items": {
@@ -527,21 +515,6 @@ fn is_valid_env_var_name(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-pub(crate) fn join_current_dir(base: &Path, relative: &str) -> PathBuf {
-    let relative_path = Path::new(relative);
-    if relative_path.starts_with(base) {
-        relative_path.to_path_buf()
-    } else if relative_path.is_relative() {
-        base.join(relative_path)
-    } else {
-        base.join(
-            relative_path
-                .strip_prefix(MAIN_SEPARATOR.to_string())
-                .unwrap_or(relative_path),
-        )
-    }
 }
 
 fn format_output_preview(
