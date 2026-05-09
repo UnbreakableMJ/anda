@@ -1,4 +1,4 @@
-use anda_core::BoxError;
+use anda_core::{BoxError, RequestMeta};
 use std::{
     ffi::OsString,
     fs::{Metadata, Permissions},
@@ -21,6 +21,174 @@ pub(crate) const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 pub(crate) const UTF8_ENCODING: &str = "utf8";
 pub(crate) const BASE64_ENCODING: &str = "base64";
 
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedFilePath {
+    pub(crate) workspace: PathBuf,
+    pub(crate) path: PathBuf,
+}
+
+pub(crate) fn normalize_workspaces<I>(workspaces: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let mut normalized = Vec::new();
+    for workspace in workspaces {
+        push_workspace(&mut normalized, workspace);
+    }
+
+    normalized
+}
+
+pub(crate) fn tool_workspaces(meta: &RequestMeta, defaults: &[PathBuf]) -> Vec<PathBuf> {
+    let mut workspaces = Vec::new();
+
+    if let Some(workspace) = meta.get_extra_as::<PathBuf>("workspace") {
+        push_workspace(&mut workspaces, workspace);
+    } else if let Some(extra_workspaces) = meta.get_extra_as::<Vec<PathBuf>>("workspace") {
+        for workspace in extra_workspaces {
+            push_workspace(&mut workspaces, workspace);
+        }
+    }
+
+    if let Some(workspace) = meta.get_extra_as::<PathBuf>("workspaces") {
+        push_workspace(&mut workspaces, workspace);
+    } else if let Some(extra_workspaces) = meta.get_extra_as::<Vec<PathBuf>>("workspaces") {
+        for workspace in extra_workspaces {
+            push_workspace(&mut workspaces, workspace);
+        }
+    }
+
+    for workspace in defaults {
+        push_workspace(&mut workspaces, workspace.clone());
+    }
+
+    workspaces
+}
+
+pub(crate) fn format_workspaces(workspaces: &[PathBuf]) -> String {
+    if workspaces.is_empty() {
+        return "<none>".to_string();
+    }
+
+    workspaces
+        .iter()
+        .map(|workspace| workspace.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn push_workspace(workspaces: &mut Vec<PathBuf>, workspace: PathBuf) {
+    if workspace.as_os_str().is_empty() {
+        return;
+    }
+
+    if !workspaces.iter().any(|existing| existing == &workspace) {
+        workspaces.push(workspace);
+    }
+}
+
+pub(crate) async fn resolve_read_path_in_workspaces(
+    workspaces: &[PathBuf],
+    user_path: &str,
+) -> Result<ResolvedFilePath, BoxError> {
+    let mut errors = Vec::new();
+
+    for workspace in workspaces {
+        match resolve_read_path(workspace, user_path).await {
+            Ok(path) => {
+                return Ok(ResolvedFilePath {
+                    workspace: workspace.clone(),
+                    path,
+                });
+            }
+            Err(err) => errors.push(format!("{}: {err}", workspace.display())),
+        }
+    }
+
+    Err(workspace_access_error(
+        "Path",
+        "requested_path",
+        user_path,
+        workspaces,
+        errors,
+    ))
+}
+
+pub(crate) async fn resolve_write_path_in_workspaces(
+    workspaces: &[PathBuf],
+    user_path: &str,
+) -> Result<ResolvedFilePath, BoxError> {
+    let requested_path = Path::new(user_path);
+
+    if requested_path.is_relative() {
+        for workspace in workspaces {
+            let candidate_path = workspace.join(requested_path);
+            match tokio::fs::symlink_metadata(&candidate_path).await {
+                Ok(_) => {
+                    let path = resolve_write_path(workspace, user_path).await?;
+                    return Ok(ResolvedFilePath {
+                        workspace: workspace.clone(),
+                        path,
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(format!(
+                        "Failed to inspect file path (workspace: {}, requested_path: {}, candidate_path: {}): {err}",
+                        workspace.display(),
+                        user_path,
+                        candidate_path.display()
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+
+    let mut errors = Vec::new();
+    for workspace in workspaces {
+        match resolve_write_path(workspace, user_path).await {
+            Ok(path) => {
+                return Ok(ResolvedFilePath {
+                    workspace: workspace.clone(),
+                    path,
+                });
+            }
+            Err(err) => errors.push(format!("{}: {err}", workspace.display())),
+        }
+    }
+
+    Err(workspace_access_error(
+        "Path",
+        "requested_path",
+        user_path,
+        workspaces,
+        errors,
+    ))
+}
+
+pub(crate) fn workspace_access_error(
+    subject: &str,
+    request_label: &str,
+    requested_value: &str,
+    workspaces: &[PathBuf],
+    errors: Vec<String>,
+) -> BoxError {
+    let details = if errors.is_empty() {
+        String::new()
+    } else {
+        format!("; errors: {}", errors.join("; "))
+    };
+
+    format!(
+        "{subject} is not accessible from any configured workspace ({request_label}: {}, workspaces: [{}]){}",
+        requested_value,
+        format_workspaces(workspaces),
+        details
+    )
+    .into()
+}
+
 /// Resolves an existing read target reachable from the workspace namespace.
 pub async fn resolve_read_path(workspace: &Path, user_path: &str) -> Result<PathBuf, BoxError> {
     let resolved_workspace = resolve_workspace_path(workspace).await?;
@@ -32,12 +200,27 @@ pub async fn resolve_read_path(workspace: &Path, user_path: &str) -> Result<Path
 
         return tokio::fs::canonicalize(&path)
             .await
-            .map_err(|err| format!("Failed to resolve file path: {err}").into());
+            .map_err(|err| {
+                format!(
+                    "Failed to resolve file path (workspace: {}, requested_path: {}, candidate_path: {}): {err}",
+                    workspace.display(),
+                    requested_path.display(),
+                    path.display()
+                )
+                .into()
+            });
     }
 
     let resolved_path = tokio::fs::canonicalize(&path)
         .await
-        .map_err(|err| format!("Failed to resolve file path: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "Failed to resolve file path (workspace: {}, requested_path: {}, candidate_path: {}): {err}",
+                workspace.display(),
+                requested_path.display(),
+                path.display()
+            )
+        })?;
 
     ensure_path_in_workspace(&resolved_workspace, &resolved_path)?;
 
@@ -52,12 +235,24 @@ pub async fn resolve_write_path(workspace: &Path, user_path: &str) -> Result<Pat
     match tokio::fs::symlink_metadata(&path).await {
         Ok(meta) => {
             if meta.file_type().is_symlink() {
-                return Err("Writing to symbolic links is not allowed".into());
+                return Err(format!(
+                    "Writing to symbolic links is not allowed (workspace: {}, path: {})",
+                    workspace.display(),
+                    path.display()
+                )
+                .into());
             }
 
             let resolved_path = tokio::fs::canonicalize(&path)
                 .await
-                .map_err(|err| format!("Failed to resolve file path: {err}"))?;
+                .map_err(|err| {
+                    format!(
+                        "Failed to resolve file path (workspace: {}, requested_path: {}, candidate_path: {}): {err}",
+                        workspace.display(),
+                        user_path,
+                        path.display()
+                    )
+                })?;
             ensure_path_in_workspace(&resolved_workspace, &resolved_path)?;
 
             Ok(resolved_path)
@@ -66,7 +261,14 @@ pub async fn resolve_write_path(workspace: &Path, user_path: &str) -> Result<Pat
             let (existing_ancestor, missing_components) = nearest_existing_ancestor(&path).await?;
             let resolved_ancestor = tokio::fs::canonicalize(&existing_ancestor)
                 .await
-                .map_err(|err| format!("Failed to resolve file path: {err}"))?;
+                .map_err(|err| {
+                    format!(
+                        "Failed to resolve file path ancestor (workspace: {}, requested_path: {}, ancestor_path: {}): {err}",
+                        workspace.display(),
+                        user_path,
+                        existing_ancestor.display()
+                    )
+                })?;
             ensure_path_in_workspace(&resolved_workspace, &resolved_ancestor)?;
 
             Ok(missing_components
@@ -74,14 +276,23 @@ pub async fn resolve_write_path(workspace: &Path, user_path: &str) -> Result<Pat
                 .rev()
                 .fold(resolved_ancestor, |acc, component| acc.join(component)))
         }
-        Err(err) => Err(format!("Failed to inspect file path: {err}").into()),
+        Err(err) => Err(format!(
+            "Failed to inspect file path (workspace: {}, path: {}): {err}",
+            workspace.display(),
+            path.display()
+        )
+        .into()),
     }
 }
 
 pub(crate) async fn resolve_workspace_path(workspace: &Path) -> Result<PathBuf, BoxError> {
-    tokio::fs::canonicalize(workspace)
-        .await
-        .map_err(|err| format!("Failed to resolve workspace path: {err}").into())
+    tokio::fs::canonicalize(workspace).await.map_err(|err| {
+        format!(
+            "Failed to resolve workspace path (workspace: {}): {err}",
+            workspace.display()
+        )
+        .into()
+    })
 }
 
 pub(crate) fn ensure_path_in_workspace(
@@ -89,7 +300,12 @@ pub(crate) fn ensure_path_in_workspace(
     resolved_path: &Path,
 ) -> Result<(), BoxError> {
     if !resolved_path.starts_with(resolved_workspace) {
-        return Err("Access to paths outside the workspace is not allowed".into());
+        return Err(format!(
+            "Access to paths outside the workspace is not allowed (resolved_workspace: {}, resolved_path: {})",
+            resolved_workspace.display(),
+            resolved_path.display()
+        )
+        .into());
     }
 
     Ok(())
@@ -111,7 +327,13 @@ pub(crate) fn ensure_path_in_workspace_namespace(
         return Ok(());
     }
 
-    Err("Access to paths outside the workspace is not allowed".into())
+    Err(format!(
+        "Access to paths outside the workspace is not allowed (workspace: {}, resolved_workspace: {}, requested_path: {})",
+        workspace.display(),
+        resolved_workspace.display(),
+        requested_path.display()
+    )
+    .into())
 }
 
 /// Returns the default encoding used for file writes.
@@ -129,14 +351,19 @@ pub(crate) fn has_multiple_hard_links(metadata: &Metadata) -> bool {
 
 pub(crate) fn ensure_regular_file(
     metadata: &Metadata,
+    path: &Path,
     hard_link_error: &str,
 ) -> Result<(), BoxError> {
     if has_multiple_hard_links(metadata) {
-        return Err(hard_link_error.to_string().into());
+        return Err(format!("{} (path: {})", hard_link_error, path.display()).into());
     }
 
     if !metadata.is_file() {
-        return Err("Path does not point to a regular file".into());
+        return Err(format!(
+            "Path does not point to a regular file (path: {})",
+            path.display()
+        )
+        .into());
     }
 
     Ok(())
@@ -144,13 +371,15 @@ pub(crate) fn ensure_regular_file(
 
 pub(crate) fn ensure_file_size_within_limit(
     metadata: &Metadata,
+    path: &Path,
     max_size_bytes: u64,
 ) -> Result<(), BoxError> {
     if metadata.len() > max_size_bytes {
         return Err(format!(
-            "File size {} exceeds maximum allowed size of {} bytes",
+            "File size {} exceeds maximum allowed size of {} bytes (path: {})",
             metadata.len(),
-            max_size_bytes
+            max_size_bytes,
+            path.display()
         )
         .into());
     }
@@ -209,23 +438,48 @@ pub(crate) async fn write_temp_file_for_atomic_replace(
         {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(format!("Failed to create temporary file: {err}").into()),
+            Err(err) => {
+                return Err(format!(
+                    "Failed to create temporary file (target_path: {}, temp_path: {}): {err}",
+                    target_path.display(),
+                    temp_path.display()
+                )
+                .into());
+            }
         };
 
         let write_result = async {
             file.write_all(data)
                 .await
-                .map_err(|err| format!("Failed to write temporary file: {err}"))?;
+                .map_err(|err| {
+                    format!(
+                        "Failed to write temporary file (target_path: {}, temp_path: {}): {err}",
+                        target_path.display(),
+                        temp_path.display()
+                    )
+                })?;
 
             if let Some(permissions) = existing_permissions {
                 tokio::fs::set_permissions(&temp_path, permissions.clone())
                     .await
-                    .map_err(|err| format!("Failed to apply file permissions: {err}"))?;
+                    .map_err(|err| {
+                        format!(
+                            "Failed to apply file permissions (target_path: {}, temp_path: {}): {err}",
+                            target_path.display(),
+                            temp_path.display()
+                        )
+                    })?;
             }
 
             file.sync_all()
                 .await
-                .map_err(|err| format!("Failed to sync temporary file: {err}"))?;
+                .map_err(|err| {
+                    format!(
+                        "Failed to sync temporary file (target_path: {}, temp_path: {}): {err}",
+                        target_path.display(),
+                        temp_path.display()
+                    )
+                })?;
 
             Ok::<(), BoxError>(())
         }
@@ -240,7 +494,11 @@ pub(crate) async fn write_temp_file_for_atomic_replace(
         return Ok(temp_path);
     }
 
-    Err("Failed to allocate unique temporary file for atomic write".into())
+    Err(format!(
+        "Failed to allocate unique temporary file for atomic write (target_path: {})",
+        target_path.display()
+    )
+    .into())
 }
 
 pub(crate) async fn commit_atomic_replace(
@@ -249,16 +507,29 @@ pub(crate) async fn commit_atomic_replace(
 ) -> Result<(), BoxError> {
     tokio::fs::rename(temp_path, target_path)
         .await
-        .map_err(|err| format!("Failed to atomically replace file: {err}").into())
+        .map_err(|err| {
+            format!(
+                "Failed to atomically replace file (temp_path: {}, target_path: {}): {err}",
+                temp_path.display(),
+                target_path.display()
+            )
+            .into()
+        })
 }
 
 fn atomic_temp_path(target_path: &Path) -> Result<PathBuf, BoxError> {
-    let parent = target_path
-        .parent()
-        .ok_or_else(|| "Failed to determine parent directory for write target".to_string())?;
-    let file_name = target_path
-        .file_name()
-        .ok_or_else(|| "Failed to determine file name for write target".to_string())?;
+    let parent = target_path.parent().ok_or_else(|| {
+        format!(
+            "Failed to determine parent directory for write target (target_path: {})",
+            target_path.display()
+        )
+    })?;
+    let file_name = target_path.file_name().ok_or_else(|| {
+        format!(
+            "Failed to determine file name for write target (target_path: {})",
+            target_path.display()
+        )
+    })?;
 
     let mut temp_name = OsString::from(".");
     temp_name.push(file_name);
@@ -279,17 +550,32 @@ pub(crate) async fn nearest_existing_ancestor(
             Ok(_) => return Ok((current, missing_components)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 let file_name = current.file_name().ok_or_else(|| {
-                    "Access to paths outside the workspace is not allowed".to_string()
+                    format!(
+                        "Access to paths outside the workspace is not allowed while resolving ancestor (requested_path: {}, current_path: {})",
+                        path.display(),
+                        current.display()
+                    )
                 })?;
                 missing_components.push(file_name.to_os_string());
                 current = current
                     .parent()
                     .ok_or_else(|| {
-                        "Access to paths outside the workspace is not allowed".to_string()
+                        format!(
+                            "Access to paths outside the workspace is not allowed while resolving ancestor (requested_path: {}, current_path: {})",
+                            path.display(),
+                            current.display()
+                        )
                     })?
                     .to_path_buf();
             }
-            Err(err) => return Err(format!("Failed to inspect file path: {err}").into()),
+            Err(err) => {
+                return Err(format!(
+                    "Failed to inspect file path while resolving ancestor (requested_path: {}, current_path: {}): {err}",
+                    path.display(),
+                    current.display()
+                )
+                .into())
+            }
         }
     }
 }

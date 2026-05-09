@@ -2,11 +2,12 @@ use anda_core::{BoxError, FunctionDefinition, Resource, StateFeatures, Tool, Too
 use ic_auth_types::ByteBufB64;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{borrow::Cow, path::PathBuf};
+use std::path::PathBuf;
 
 use super::{
     BASE64_ENCODING, MAX_FILE_SIZE_BYTES, UTF8_ENCODING, ensure_file_size_within_limit,
-    ensure_regular_file, resolve_read_path,
+    ensure_regular_file, format_workspaces, normalize_workspaces, resolve_read_path_in_workspaces,
+    tool_workspaces,
 };
 use crate::{
     context::BaseCtx,
@@ -47,7 +48,7 @@ pub type ReadFileHook = DynToolHook<ReadFileArgs, ReadFileOutput>;
 
 #[derive(Clone)]
 pub struct ReadFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     description: String,
 }
 
@@ -55,12 +56,25 @@ impl ReadFileTool {
     /// Tool name used for registration and function definition.
     pub const NAME: &'static str = "read_file";
 
-    /// Create a new `ReadFileTool` with the default working directory.
-    /// You can override the working directory for each call by including a `workspace` field in the tool call's context meta extra.
+    /// Create a new `ReadFileTool` with the default workspace directory.
+    /// You can add workspace directories for each call by including `workspace` or `workspaces` in the tool call's context meta extra.
     pub fn new(workspace: PathBuf) -> Self {
-        let description = "Read files from the filesystem in the workspace directory".to_string();
+        Self::with_workspaces([workspace])
+    }
+
+    /// Create a new `ReadFileTool` with the default workspace directories.
+    /// Context meta workspaces take precedence over these defaults at call time.
+    pub fn with_workspaces<I>(workspaces: I) -> Self
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        let workspaces = normalize_workspaces(workspaces);
+        let description = format!(
+            "Read files from the filesystem in the workspace directories ({})",
+            format_workspaces(&workspaces)
+        );
         Self {
-            workspace,
+            workspaces,
             description,
         }
     }
@@ -92,7 +106,7 @@ impl Tool<BaseCtx> for ReadFileTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the file. Relative paths resolve from the workspace; paths outside the workspace are not allowed."
+                        "description": "Path to the file. Relative paths resolve from the configured workspaces in priority order; absolute paths must be inside one configured workspace."
                     },
                     "offset": {
                         "type": "integer",
@@ -123,25 +137,37 @@ impl Tool<BaseCtx> for ReadFileTool {
             args
         };
 
-        let workspace = ctx
-            .meta()
-            .get_extra_as::<String>("workspace")
-            .map(PathBuf::from)
-            .map(Cow::Owned)
-            .unwrap_or_else(|| Cow::Borrowed(&self.workspace));
-
-        let resolved_path = resolve_read_path(&workspace, &args.path).await?;
+        let workspaces = tool_workspaces(ctx.meta(), &self.workspaces);
+        let resolved = resolve_read_path_in_workspaces(&workspaces, &args.path).await?;
+        let workspace_display = resolved.workspace.display().to_string();
+        let resolved_path = resolved.path;
 
         let meta = tokio::fs::metadata(&resolved_path)
             .await
-            .map_err(|err| format!("Failed to read file metadata: {err}"))?;
+            .map_err(|err| {
+                format!(
+                    "Failed to read file metadata (workspace: {}, requested_path: {}, resolved_path: {}): {err}",
+                    workspace_display,
+                    args.path,
+                    resolved_path.display()
+                )
+            })?;
 
-        ensure_regular_file(&meta, "Reading multiply-linked file is not allowed")?;
-        ensure_file_size_within_limit(&meta, MAX_FILE_SIZE_BYTES)?;
+        ensure_regular_file(
+            &meta,
+            &resolved_path,
+            "Reading multiply-linked file is not allowed",
+        )?;
+        ensure_file_size_within_limit(&meta, &resolved_path, MAX_FILE_SIZE_BYTES)?;
 
-        let data = tokio::fs::read(&resolved_path)
-            .await
-            .map_err(|err| format!("Failed to read file: {err}"))?;
+        let data = tokio::fs::read(&resolved_path).await.map_err(|err| {
+            format!(
+                "Failed to read file (workspace: {}, requested_path: {}, resolved_path: {}): {err}",
+                workspace_display,
+                args.path,
+                resolved_path.display()
+            )
+        })?;
         let mut output = ReadFileOutput {
             content: String::new(),
             encoding: UTF8_ENCODING.to_string(),
@@ -185,6 +211,7 @@ impl Tool<BaseCtx> for ReadFileTool {
 mod tests {
     use super::*;
     use crate::engine::EngineBuilder;
+    use serde_json::json;
     use std::path::{Path, PathBuf};
 
     struct TestTempDir(PathBuf);
@@ -212,8 +239,45 @@ mod tests {
         EngineBuilder::new().mock_ctx().base
     }
 
+    fn mock_ctx_with_workspace(workspace: &Path) -> BaseCtx {
+        let mut ctx = mock_ctx();
+        ctx.meta.extra.insert(
+            "workspace".to_string(),
+            json!(workspace.to_string_lossy().to_string()),
+        );
+        ctx
+    }
+
     fn read_tool(workspace: &Path) -> ReadFileTool {
         ReadFileTool::new(workspace.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn reads_from_default_workspace_when_meta_workspace_has_no_match() {
+        let temp_dir = TestTempDir::new().await;
+        let runtime_workspace = temp_dir.path().join("runtime");
+        let home_workspace = temp_dir.path().join("home");
+        tokio::fs::create_dir_all(&runtime_workspace).await.unwrap();
+        tokio::fs::create_dir_all(&home_workspace).await.unwrap();
+        tokio::fs::write(home_workspace.join("notes.txt"), "from home")
+            .await
+            .unwrap();
+
+        let result = read_tool(&home_workspace)
+            .call(
+                mock_ctx_with_workspace(&runtime_workspace),
+                ReadFileArgs {
+                    path: "notes.txt".to_string(),
+                    offset: 0,
+                    limit: 0,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.output.content, "from home");
+        assert_eq!(result.output.encoding, "utf8");
     }
 
     #[tokio::test]

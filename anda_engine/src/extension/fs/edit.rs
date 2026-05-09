@@ -1,11 +1,11 @@
 use anda_core::{BoxError, FunctionDefinition, Resource, StateFeatures, Tool, ToolOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{borrow::Cow, path::PathBuf};
+use std::path::PathBuf;
 
 use super::{
     MAX_FILE_SIZE_BYTES, atomic_write_file, ensure_file_size_within_limit, ensure_regular_file,
-    resolve_write_path,
+    format_workspaces, normalize_workspaces, resolve_write_path_in_workspaces, tool_workspaces,
 };
 use crate::{
     context::BaseCtx,
@@ -41,7 +41,7 @@ pub type EditFileHook = DynToolHook<EditFileArgs, EditFileOutput>;
 
 #[derive(Clone)]
 pub struct EditFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     description: String,
 }
 
@@ -49,14 +49,25 @@ impl EditFileTool {
     /// Tool name used for registration and function definition.
     pub const NAME: &'static str = "edit_file";
 
-    /// Create a new `EditFileTool` with the default working directory.
-    /// You can override the working directory for each call by including a `workspace` field in the tool call's context meta extra.
+    /// Create a new `EditFileTool` with the default workspace directory.
+    /// You can add workspace directories for each call by including `workspace` or `workspaces` in the tool call's context meta extra.
     pub fn new(workspace: PathBuf) -> Self {
-        let description =
-            "Atomically edit UTF-8 files in the workspace directory by replacing strings"
-                .to_string();
+        Self::with_workspaces([workspace])
+    }
+
+    /// Create a new `EditFileTool` with the default workspace directories.
+    /// Context meta workspaces take precedence over these defaults at call time.
+    pub fn with_workspaces<I>(workspaces: I) -> Self
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        let workspaces = normalize_workspaces(workspaces);
+        let description = format!(
+            "Atomically edit UTF-8 files in the workspace directories ({}) by replacing strings",
+            format_workspaces(&workspaces)
+        );
         Self {
-            workspace,
+            workspaces,
             description,
         }
     }
@@ -88,7 +99,7 @@ impl Tool<BaseCtx> for EditFileTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the UTF-8 file. Relative paths resolve from the workspace; paths outside the workspace are not allowed."
+                        "description": "Path to the UTF-8 file. Relative paths resolve from the configured workspaces in priority order; absolute paths must be inside one configured workspace."
                     },
                     "old_string": {
                         "type": "string",
@@ -123,34 +134,65 @@ impl Tool<BaseCtx> for EditFileTool {
             args
         };
 
+        let workspaces = tool_workspaces(ctx.meta(), &self.workspaces);
+        let workspace_display = format_workspaces(&workspaces);
+
         if args.old_string.is_empty() {
-            return Err("Old string must not be empty".into());
+            return Err(format!(
+                "Old string must not be empty (workspace: {}, path: {})",
+                workspace_display, args.path
+            )
+            .into());
         }
 
-        let workspace = ctx
-            .meta()
-            .get_extra_as::<String>("workspace")
-            .map(PathBuf::from)
-            .map(Cow::Owned)
-            .unwrap_or_else(|| Cow::Borrowed(&self.workspace));
-
-        let resolved_path = resolve_write_path(&workspace, &args.path).await?;
+        let resolved = resolve_write_path_in_workspaces(&workspaces, &args.path).await?;
+        let workspace_display = resolved.workspace.display().to_string();
+        let resolved_path = resolved.path;
         let meta = match tokio::fs::metadata(&resolved_path).await {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err("Path does not point to an existing file".into());
+                return Err(format!(
+                    "Path does not point to an existing file (workspace: {}, requested_path: {}, resolved_path: {})",
+                    workspace_display,
+                    args.path,
+                    resolved_path.display()
+                )
+                .into());
             }
-            Err(err) => return Err(format!("Failed to read file metadata: {err}").into()),
+            Err(err) => {
+                return Err(format!(
+                    "Failed to read file metadata (workspace: {}, requested_path: {}, resolved_path: {}): {err}",
+                    workspace_display,
+                    args.path,
+                    resolved_path.display()
+                )
+                .into())
+            }
         };
 
-        ensure_regular_file(&meta, "Editing multiply-linked files is not allowed")?;
-        ensure_file_size_within_limit(&meta, MAX_FILE_SIZE_BYTES)?;
+        ensure_regular_file(
+            &meta,
+            &resolved_path,
+            "Editing multiply-linked files is not allowed",
+        )?;
+        ensure_file_size_within_limit(&meta, &resolved_path, MAX_FILE_SIZE_BYTES)?;
 
-        let data = tokio::fs::read(&resolved_path)
-            .await
-            .map_err(|err| format!("Failed to read file: {err}"))?;
-        let text = String::from_utf8(data)
-            .map_err(|_| "Editing non-UTF-8 files is not supported".to_string())?;
+        let data = tokio::fs::read(&resolved_path).await.map_err(|err| {
+            format!(
+                "Failed to read file (workspace: {}, requested_path: {}, resolved_path: {}): {err}",
+                workspace_display,
+                args.path,
+                resolved_path.display()
+            )
+        })?;
+        let text = String::from_utf8(data).map_err(|_| {
+            format!(
+                "Editing non-UTF-8 files is not supported (workspace: {}, requested_path: {}, resolved_path: {})",
+                workspace_display,
+                args.path,
+                resolved_path.display()
+            )
+        })?;
         let total_matches = text.match_indices(&args.old_string).count();
 
         let replacements = if args.limit == 0 {
@@ -197,6 +239,7 @@ impl Tool<BaseCtx> for EditFileTool {
 mod tests {
     use super::*;
     use crate::engine::EngineBuilder;
+    use serde_json::json;
     use std::path::{Path, PathBuf};
 
     struct TestTempDir(PathBuf);
@@ -224,8 +267,49 @@ mod tests {
         EngineBuilder::new().mock_ctx().base
     }
 
+    fn mock_ctx_with_workspace(workspace: &Path) -> BaseCtx {
+        let mut ctx = mock_ctx();
+        ctx.meta.extra.insert(
+            "workspace".to_string(),
+            json!(workspace.to_string_lossy().to_string()),
+        );
+        ctx
+    }
+
     fn edit_tool(workspace: &Path) -> EditFileTool {
         EditFileTool::new(workspace.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn edits_default_workspace_when_meta_workspace_has_no_match() {
+        let temp_dir = TestTempDir::new().await;
+        let runtime_workspace = temp_dir.path().join("runtime");
+        let home_workspace = temp_dir.path().join("home");
+        tokio::fs::create_dir_all(&runtime_workspace).await.unwrap();
+        tokio::fs::create_dir_all(&home_workspace).await.unwrap();
+        tokio::fs::write(home_workspace.join("notes.txt"), "alpha alpha")
+            .await
+            .unwrap();
+
+        let result = edit_tool(&home_workspace)
+            .call(
+                mock_ctx_with_workspace(&runtime_workspace),
+                EditFileArgs {
+                    path: "notes.txt".to_string(),
+                    old_string: "alpha".to_string(),
+                    new_string: "omega".to_string(),
+                    limit: 0,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.output.replacements, 2);
+        let written = tokio::fs::read_to_string(home_workspace.join("notes.txt"))
+            .await
+            .unwrap();
+        assert_eq!(written, "omega omega");
     }
 
     #[tokio::test]

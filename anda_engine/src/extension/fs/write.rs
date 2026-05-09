@@ -2,11 +2,11 @@ use anda_core::{BoxError, FunctionDefinition, Resource, StateFeatures, Tool, Too
 use ic_auth_types::ByteBufB64;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{borrow::Cow, path::PathBuf, str::FromStr};
+use std::{path::PathBuf, str::FromStr};
 
 use super::{
     BASE64_ENCODING, UTF8_ENCODING, atomic_write_file, default_write_encoding, ensure_regular_file,
-    resolve_write_path,
+    format_workspaces, normalize_workspaces, resolve_write_path_in_workspaces, tool_workspaces,
 };
 use crate::{
     context::BaseCtx,
@@ -46,7 +46,7 @@ pub type WriteFileHook = DynToolHook<WriteFileArgs, WriteFileOutput>;
 
 #[derive(Clone)]
 pub struct WriteFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     description: String,
 }
 
@@ -54,13 +54,25 @@ impl WriteFileTool {
     /// Tool name used for registration and function definition.
     pub const NAME: &'static str = "write_file";
 
-    /// Create a new `WriteFileTool` with the default working directory.
-    /// You can override the working directory for each call by including a `workspace` field in the tool call's context meta extra.
+    /// Create a new `WriteFileTool` with the default workspace directory.
+    /// You can add workspace directories for each call by including `workspace` or `workspaces` in the tool call's context meta extra.
     pub fn new(workspace: PathBuf) -> Self {
-        let description =
-            "Atomically write files to the filesystem in the workspace directory".to_string();
+        Self::with_workspaces([workspace])
+    }
+
+    /// Create a new `WriteFileTool` with the default workspace directories.
+    /// Context meta workspaces take precedence over these defaults at call time.
+    pub fn with_workspaces<I>(workspaces: I) -> Self
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        let workspaces = normalize_workspaces(workspaces);
+        let description = format!(
+            "Atomically write files to the filesystem in the workspace directories ({})",
+            format_workspaces(&workspaces)
+        );
         Self {
-            workspace,
+            workspaces,
             description,
         }
     }
@@ -92,7 +104,7 @@ impl Tool<BaseCtx> for WriteFileTool {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the file. Relative paths resolve from the workspace; paths outside the workspace are not allowed."
+                        "description": "Path to the file. Relative paths resolve from the configured workspaces in priority order; absolute paths must be inside one configured workspace."
                     },
                     "content": {
                         "type": "string",
@@ -123,20 +135,26 @@ impl Tool<BaseCtx> for WriteFileTool {
             args
         };
 
-        let workspace = ctx
-            .meta()
-            .get_extra_as::<String>("workspace")
-            .map(PathBuf::from)
-            .map(Cow::Owned)
-            .unwrap_or_else(|| Cow::Borrowed(&self.workspace));
+        let workspaces = tool_workspaces(ctx.meta(), &self.workspaces);
+        let resolved = resolve_write_path_in_workspaces(&workspaces, &args.path).await?;
+        let workspace_display = resolved.workspace.display().to_string();
+        let resolved_path = resolved.path;
 
-        let resolved_path = resolve_write_path(&workspace, &args.path).await?;
-
-        let data = decode_content(args.content, &args.encoding)?;
+        let data = decode_content(
+            args.content,
+            &args.encoding,
+            &args.path,
+            &workspace_display,
+            &resolved_path,
+        )?;
 
         let existing_permissions = match tokio::fs::metadata(&resolved_path).await {
             Ok(meta) => {
-                ensure_regular_file(&meta, "Writing multiply-linked files is not allowed")?;
+                ensure_regular_file(
+                    &meta,
+                    &resolved_path,
+                    "Writing multiply-linked files is not allowed",
+                )?;
 
                 Some(meta.permissions())
             }
@@ -145,12 +163,28 @@ impl Tool<BaseCtx> for WriteFileTool {
                     // Ensure parent directories exist for newly created files.
                     tokio::fs::create_dir_all(parent)
                         .await
-                        .map_err(|err| format!("Failed to create parent directories: {err}"))?;
+                        .map_err(|err| {
+                            format!(
+                                "Failed to create parent directories (workspace: {}, requested_path: {}, resolved_path: {}, parent_path: {}): {err}",
+                                workspace_display,
+                                args.path,
+                                resolved_path.display(),
+                                parent.display()
+                            )
+                        })?;
                 }
 
                 None
             }
-            Err(err) => return Err(format!("Failed to read file metadata: {err}").into()),
+            Err(err) => {
+                return Err(format!(
+                    "Failed to read file metadata (workspace: {}, requested_path: {}, resolved_path: {}): {err}",
+                    workspace_display,
+                    args.path,
+                    resolved_path.display()
+                )
+                .into())
+            }
         };
 
         let size = data.len() as u64;
@@ -166,13 +200,34 @@ impl Tool<BaseCtx> for WriteFileTool {
     }
 }
 /// Decodes content according to the requested encoding.
-fn decode_content(content: String, encoding: &str) -> Result<Vec<u8>, BoxError> {
+fn decode_content(
+    content: String,
+    encoding: &str,
+    requested_path: &str,
+    workspace: &str,
+    resolved_path: &std::path::Path,
+) -> Result<Vec<u8>, BoxError> {
     match encoding {
         UTF8_ENCODING => Ok(content.into_bytes()),
         BASE64_ENCODING => ByteBufB64::from_str(&content)
             .map(|decoded| decoded.0)
-            .map_err(|err| format!("Failed to decode base64 content: {err}").into()),
-        other => Err(format!("Unsupported encoding {other:?}. Expected 'utf8' or 'base64'").into()),
+            .map_err(|err| {
+                format!(
+                    "Failed to decode base64 content (workspace: {}, requested_path: {}, resolved_path: {}, encoding: {}): {err}",
+                    workspace,
+                    requested_path,
+                    resolved_path.display(),
+                    encoding
+                )
+                .into()
+            }),
+        other => Err(format!(
+            "Unsupported encoding {other:?}. Expected 'utf8' or 'base64' (workspace: {}, requested_path: {}, resolved_path: {})",
+            workspace,
+            requested_path,
+            resolved_path.display()
+        )
+        .into()),
     }
 }
 
@@ -211,8 +266,83 @@ mod tests {
         EngineBuilder::new().mock_ctx().base
     }
 
+    fn mock_ctx_with_workspace(workspace: &Path) -> BaseCtx {
+        let mut ctx = mock_ctx();
+        ctx.meta.extra.insert(
+            "workspace".to_string(),
+            json!(workspace.to_string_lossy().to_string()),
+        );
+        ctx
+    }
+
     fn write_tool(workspace: &Path) -> WriteFileTool {
         WriteFileTool::new(workspace.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn writes_existing_file_in_default_workspace_when_meta_workspace_has_no_match() {
+        let temp_dir = TestTempDir::new().await;
+        let runtime_workspace = temp_dir.path().join("runtime");
+        let home_workspace = temp_dir.path().join("home");
+        tokio::fs::create_dir_all(&runtime_workspace).await.unwrap();
+        tokio::fs::create_dir_all(&home_workspace).await.unwrap();
+        tokio::fs::write(home_workspace.join("notes.txt"), "before")
+            .await
+            .unwrap();
+
+        let result = write_tool(&home_workspace)
+            .call(
+                mock_ctx_with_workspace(&runtime_workspace),
+                WriteFileArgs {
+                    path: "notes.txt".to_string(),
+                    content: "after".to_string(),
+                    encoding: UTF8_ENCODING.to_string(),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.output.size, 5);
+        let written = tokio::fs::read_to_string(home_workspace.join("notes.txt"))
+            .await
+            .unwrap();
+        assert_eq!(written, "after");
+        assert!(matches!(
+            tokio::fs::metadata(runtime_workspace.join("notes.txt")).await,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn writes_new_relative_file_in_meta_workspace_first() {
+        let temp_dir = TestTempDir::new().await;
+        let runtime_workspace = temp_dir.path().join("runtime");
+        let home_workspace = temp_dir.path().join("home");
+        tokio::fs::create_dir_all(&runtime_workspace).await.unwrap();
+        tokio::fs::create_dir_all(&home_workspace).await.unwrap();
+
+        write_tool(&home_workspace)
+            .call(
+                mock_ctx_with_workspace(&runtime_workspace),
+                WriteFileArgs {
+                    path: "notes.txt".to_string(),
+                    content: "runtime".to_string(),
+                    encoding: UTF8_ENCODING.to_string(),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let written = tokio::fs::read_to_string(runtime_workspace.join("notes.txt"))
+            .await
+            .unwrap();
+        assert_eq!(written, "runtime");
+        assert!(matches!(
+            tokio::fs::metadata(home_workspace.join("notes.txt")).await,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound
+        ));
     }
 
     #[tokio::test]

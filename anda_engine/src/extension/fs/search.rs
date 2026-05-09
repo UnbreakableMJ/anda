@@ -2,14 +2,13 @@ use anda_core::{BoxError, FunctionDefinition, Resource, StateFeatures, Tool, Too
 use glob::{MatchOptions, glob_with};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    borrow::Cow,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
 
 use super::{
-    ensure_path_in_workspace, ensure_path_in_workspace_namespace, nearest_existing_ancestor,
-    normalize_relative_path, path_contains_parent_reference, resolve_workspace_path,
+    ensure_path_in_workspace, ensure_path_in_workspace_namespace, format_workspaces,
+    nearest_existing_ancestor, normalize_relative_path, normalize_workspaces,
+    path_contains_parent_reference, resolve_workspace_path, tool_workspaces,
+    workspace_access_error,
 };
 use crate::{
     context::BaseCtx,
@@ -41,7 +40,7 @@ pub type SearchFileHook = DynToolHook<SearchFileArgs, SearchFileOutput>;
 
 #[derive(Clone)]
 pub struct SearchFileTool {
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
     description: String,
 }
 
@@ -49,13 +48,25 @@ impl SearchFileTool {
     /// Tool name used for registration and function definition.
     pub const NAME: &'static str = "search_file";
 
-    /// Create a new `SearchFileTool` with the default working directory.
-    /// You can override the working directory for each call by including a `workspace` field in the tool call's context meta extra.
+    /// Create a new `SearchFileTool` with the default workspace directory.
+    /// You can add workspace directories for each call by including `workspace` or `workspaces` in the tool call's context meta extra.
     pub fn new(workspace: PathBuf) -> Self {
-        let description =
-            "Match filesystem paths with glob patterns in the workspace directory".to_string();
+        Self::with_workspaces([workspace])
+    }
+
+    /// Create a new `SearchFileTool` with the default workspace directories.
+    /// Context meta workspaces take precedence over these defaults at call time.
+    pub fn with_workspaces<I>(workspaces: I) -> Self
+    where
+        I: IntoIterator<Item = PathBuf>,
+    {
+        let workspaces = normalize_workspaces(workspaces);
+        let description = format!(
+            "Match filesystem paths with glob patterns in the workspace directories ({})",
+            format_workspaces(&workspaces)
+        );
         Self {
-            workspace,
+            workspaces,
             description,
         }
     }
@@ -87,7 +98,7 @@ impl Tool<BaseCtx> for SearchFileTool {
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Relative or absolute glob pattern. Matches are restricted to paths reachable from the workspace namespace."
+                        "description": "Relative or absolute glob pattern. Relative patterns are expanded in all configured workspace namespaces; absolute patterns must be inside one configured workspace."
                     },
                     "limit": {
                         "type": "integer",
@@ -114,34 +125,73 @@ impl Tool<BaseCtx> for SearchFileTool {
             args
         };
 
-        let workspace = ctx
-            .meta()
-            .get_extra_as::<String>("workspace")
-            .map(PathBuf::from)
-            .map(Cow::Owned)
-            .unwrap_or_else(|| Cow::Borrowed(&self.workspace));
-
-        let (resolved_workspace, pattern, restrict_to_workspace_targets) =
-            resolve_glob_pattern(&workspace, &args.pattern).await?;
-
+        let workspaces = tool_workspaces(ctx.meta(), &self.workspaces);
         let mut paths = Vec::new();
-        for entry in glob_with(&pattern, glob_match_options())
-            .map_err(|err| format!("Invalid glob pattern: {err}"))?
-        {
-            let path = entry.map_err(|err| format!("Failed to expand glob pattern: {err}"))?;
-            let resolved_path = tokio::fs::canonicalize(&path)
-                .await
-                .map_err(|err| format!("Failed to resolve matched path: {err}"))?;
-            if restrict_to_workspace_targets {
-                ensure_path_in_workspace(&resolved_workspace, &resolved_path)?;
-            }
+        let mut errors = Vec::new();
+        let mut searched_any_workspace = false;
 
-            paths.push(relative_match_path(
-                &path,
-                &resolved_path,
-                &workspace,
-                &resolved_workspace,
-            )?);
+        for workspace in &workspaces {
+            let workspace_display = workspace.display().to_string();
+            let (resolved_workspace, pattern, restrict_to_workspace_targets) =
+                match resolve_glob_pattern(workspace, &args.pattern).await {
+                    Ok(resolved) => resolved,
+                    Err(err) => {
+                        errors.push(format!("{}: {err}", workspace.display()));
+                        continue;
+                    }
+                };
+            searched_any_workspace = true;
+
+            for entry in glob_with(&pattern, glob_match_options())
+                .map_err(|err| {
+                    format!(
+                        "Invalid glob pattern (workspace: {}, requested_pattern: {}, expanded_pattern: {}): {err}",
+                        workspace_display,
+                        args.pattern,
+                        pattern
+                    )
+                })?
+            {
+                let path = entry.map_err(|err| {
+                    format!(
+                        "Failed to expand glob pattern (workspace: {}, requested_pattern: {}, expanded_pattern: {}): {err}",
+                        workspace_display,
+                        args.pattern,
+                        pattern
+                    )
+                })?;
+                let resolved_path = tokio::fs::canonicalize(&path)
+                    .await
+                    .map_err(|err| {
+                        format!(
+                            "Failed to resolve matched path (workspace: {}, requested_pattern: {}, expanded_pattern: {}, matched_path: {}): {err}",
+                            workspace_display,
+                            args.pattern,
+                            pattern,
+                            path.display()
+                        )
+                    })?;
+                if restrict_to_workspace_targets {
+                    ensure_path_in_workspace(&resolved_workspace, &resolved_path)?;
+                }
+
+                paths.push(relative_match_path(
+                    &path,
+                    &resolved_path,
+                    workspace,
+                    &resolved_workspace,
+                )?);
+            }
+        }
+
+        if !searched_any_workspace {
+            return Err(workspace_access_error(
+                "Glob pattern",
+                "requested_pattern",
+                &args.pattern,
+                &workspaces,
+                errors,
+            ));
         }
 
         paths.sort();
@@ -180,7 +230,11 @@ async fn resolve_glob_pattern(
     pattern: &str,
 ) -> Result<(PathBuf, String, bool), BoxError> {
     if pattern.trim().is_empty() {
-        return Err("Glob pattern must not be empty".into());
+        return Err(format!(
+            "Glob pattern must not be empty (workspace: {})",
+            workspace.display()
+        )
+        .into());
     }
 
     let resolved_workspace = resolve_workspace_path(workspace).await?;
@@ -201,7 +255,15 @@ async fn resolve_glob_pattern(
     let (existing_ancestor, _) = nearest_existing_ancestor(&literal_prefix).await?;
     let resolved_ancestor = tokio::fs::canonicalize(&existing_ancestor)
         .await
-        .map_err(|err| format!("Failed to resolve glob path: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "Failed to resolve glob path (workspace: {}, requested_pattern: {}, literal_prefix: {}, existing_ancestor: {}): {err}",
+                workspace.display(),
+                pattern,
+                literal_prefix.display(),
+                existing_ancestor.display()
+            )
+        })?;
 
     ensure_path_in_workspace(&resolved_workspace, &resolved_ancestor)?;
 
@@ -262,7 +324,15 @@ fn relative_match_path(
 
     let relative = resolved_path
         .strip_prefix(resolved_workspace)
-        .map_err(|err| format!("Failed to normalize matched path: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "Failed to normalize matched path (workspace: {}, resolved_workspace: {}, matched_path: {}, resolved_matched_path: {}): {err}",
+                workspace.display(),
+                resolved_workspace.display(),
+                path.display(),
+                resolved_path.display()
+            )
+        })?;
     Ok(normalize_relative_path(relative))
 }
 
@@ -270,6 +340,7 @@ fn relative_match_path(
 mod tests {
     use super::*;
     use crate::engine::EngineBuilder;
+    use serde_json::json;
     use std::path::{Path, PathBuf};
 
     struct TestTempDir(PathBuf);
@@ -297,8 +368,70 @@ mod tests {
         EngineBuilder::new().mock_ctx().base
     }
 
+    fn mock_ctx_with_workspaces(workspace: &Path, workspaces: &[&Path]) -> BaseCtx {
+        let mut ctx = mock_ctx();
+        ctx.meta.extra.insert(
+            "workspace".to_string(),
+            json!(workspace.to_string_lossy().to_string()),
+        );
+        ctx.meta.extra.insert(
+            "workspaces".to_string(),
+            json!(
+                workspaces
+                    .iter()
+                    .map(|workspace| workspace.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+            ),
+        );
+        ctx
+    }
+
     fn glob_tool(workspace: &Path) -> SearchFileTool {
         SearchFileTool::new(workspace.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn searches_meta_extra_and_default_workspaces() {
+        let temp_dir = TestTempDir::new().await;
+        let runtime_workspace = temp_dir.path().join("runtime");
+        let extra_workspace = temp_dir.path().join("extra");
+        let home_workspace = temp_dir.path().join("home");
+        tokio::fs::create_dir_all(runtime_workspace.join("src"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(extra_workspace.join("src"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(home_workspace.join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(runtime_workspace.join("src/runtime.rs"), "runtime")
+            .await
+            .unwrap();
+        tokio::fs::write(extra_workspace.join("src/extra.rs"), "extra")
+            .await
+            .unwrap();
+        tokio::fs::write(home_workspace.join("src/home.rs"), "home")
+            .await
+            .unwrap();
+
+        let result = glob_tool(&home_workspace)
+            .call(
+                mock_ctx_with_workspaces(&runtime_workspace, &[&extra_workspace]),
+                SearchFileArgs {
+                    pattern: "src/*.rs".to_string(),
+                    limit: 0,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.output.paths,
+            ["src/extra.rs", "src/home.rs", "src/runtime.rs"]
+        );
+        assert_eq!(result.output.total_matches, 3);
     }
 
     #[tokio::test]

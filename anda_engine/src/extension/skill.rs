@@ -95,12 +95,14 @@ impl SkillManager {
     /// Create a new, empty manager rooted at `skills_dir`.
     pub fn new(skills_dir: PathBuf) -> Self {
         Self {
-            skills_dir,
             skills: RwLock::new(BTreeMap::new()),
-            description: "Load reusable skills following the Agent Skills specification and read \
+            description: format!(
+                "Load reusable skills following the Agent Skills specification and read \
             a skill's SKILL.md content by name. Agent Skills are folders of instructions, \
-            scripts, and resources that agents can follow directly or invoke as subagents."
-                .to_string(),
+            scripts, and resources that agents can follow directly or invoke as subagents. Skills: {}",
+                skills_dir.display()
+            ),
+            skills_dir,
             default_skill_tools: DEFAULT_SKILL_TOOLS.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -127,17 +129,25 @@ impl SkillManager {
     }
 
     async fn read_text_file(&self, path: &Path, max_size: u64) -> Result<String, BoxError> {
-        let meta = tokio::fs::symlink_metadata(path)
-            .await
-            .map_err(|err| format!("Failed to inspect file metadata: {err}"))?;
-        ensure_regular_file(&meta, "Reading multiply-linked files is not allowed")?;
-        ensure_file_size_within_limit(&meta, max_size)?;
+        let meta = tokio::fs::symlink_metadata(path).await.map_err(|err| {
+            format!(
+                "Failed to inspect file metadata (path: {}): {err}",
+                path.display()
+            )
+        })?;
+        ensure_regular_file(&meta, path, "Reading multiply-linked files is not allowed")?;
+        ensure_file_size_within_limit(&meta, path, max_size)?;
 
         let data = tokio::fs::read(path)
             .await
-            .map_err(|err| format!("Failed to read file: {err}"))?;
-        String::from_utf8(data)
-            .map_err(|_| "Only UTF-8 skill files are supported by skills_manager".into())
+            .map_err(|err| format!("Failed to read file (path: {}): {err}", path.display()))?;
+        String::from_utf8(data).map_err(|_| {
+            format!(
+                "Only UTF-8 skill files are supported by skills_manager (path: {})",
+                path.display()
+            )
+            .into()
+        })
     }
 
     async fn find_skill_dir(&self, name: &str) -> Result<Option<PathBuf>, BoxError> {
@@ -225,6 +235,10 @@ impl SkillManager {
             )
             .into());
         }
+        self.skills
+            .write()
+            .entry(skill.agent_name.clone())
+            .insert_entry(skill.clone());
 
         Ok(SkillContentOutput {
             name: skill.frontmatter.name,
