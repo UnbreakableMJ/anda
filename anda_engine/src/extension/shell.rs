@@ -86,12 +86,6 @@ pub trait Executor: Send + Sync {
     /// The user-provided [`ExecArgs::workspace`] is resolved relative to this path.
     fn workspace(&self) -> &PathBuf;
 
-    /// Return the temporary directory used by this runtime.
-    ///
-    /// Oversized command output may be persisted here and referenced by
-    /// [`ExecOutput::raw_output_path`].
-    fn temp_dir(&self) -> &PathBuf;
-
     /// Return the shell program name used by this runtime, if any.
     fn shell(&self) -> &str;
 
@@ -118,7 +112,7 @@ pub struct ExecArgs {
     #[serde(default)]
     pub env_keys: Vec<String>,
 
-    /// Whether to return immediately and deliver final output through hooks.
+    /// Whether to return immediately and deliver normalized progress plus final output through hooks.
     #[serde(default)]
     pub background: bool,
 }
@@ -377,7 +371,7 @@ impl Tool<BaseCtx> for ShellTool {
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "Whether to run the command in the background (non-blocking). The final output will be pushed to you when the task is completed through hooks.",
+                        "description": "Whether to run the command in the background (non-blocking). New stdout/stderr output is pushed through background progress hooks about every 3 seconds, with UTF-8 split boundaries preserved and terminal-style rewritten progress lines normalized to their latest visible text. The final output is pushed through background end hooks when the task completes.",
                         "default": false
                     }
                 },
@@ -613,7 +607,6 @@ mod tests {
     struct TestRuntime {
         name: &'static str,
         workspace: PathBuf,
-        temp_dir: PathBuf,
     }
 
     impl TestRuntime {
@@ -621,7 +614,6 @@ mod tests {
             Self {
                 name,
                 workspace: PathBuf::from("/tmp/anda-shell-test-workspace"),
-                temp_dir: std::env::temp_dir(),
             }
         }
     }
@@ -634,10 +626,6 @@ mod tests {
 
         fn workspace(&self) -> &PathBuf {
             &self.workspace
-        }
-
-        fn temp_dir(&self) -> &PathBuf {
-            &self.temp_dir
         }
 
         fn shell(&self) -> &str {

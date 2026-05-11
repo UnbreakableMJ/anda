@@ -84,7 +84,6 @@ static DEFAULT_SKILL_TOOLS: &[&str] = &[
     "write_file",
     "edit_file",
     "todo",
-    "tools_search",
     "tools_select",
 ];
 
@@ -495,7 +494,6 @@ Beta instructions.
                 "write_file",
                 "edit_file",
                 "todo",
-                "tools_search",
                 "tools_select",
                 "fetch"
             ]

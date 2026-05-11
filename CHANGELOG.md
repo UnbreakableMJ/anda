@@ -2,6 +2,28 @@
 
 All notable changes to the Anda project will be documented in this file.
 
+## [0.12.3] — 2026-05-11
+
+### Features
+
+- **Background shell progress hooks** — `on_background_progress()` hook delivers incremental stdout/stderr every ~3 seconds while a background command runs. `TerminalProgressState` normalizes rewritten terminal lines (`\r`, `\b`, ANSI `ESC[K`) to their latest visible text, so the model sees clean output instead of raw control characters. UTF-8 boundary-safe chunking via `complete_utf8_prefix_len()` prevents splitting multi-byte sequences across progress deliveries.
+- **`insecure()` mode for NativeRuntime** — builder option to skip `env_clear()`, allowing the shell to inherit host environment variables.
+
+### Refactors
+
+- **`execute_command()` extracted as public method** on `NativeRuntime` — takes a `std::process::Command` directly, enabling non-shell invocations through the native runtime. `build_shell_command()` now returns `std::process::Command` (decoupled from tokio).
+- **`ToolsSearch::NAME` and `ToolsSelect::NAME`** added as `pub const` — used in `name()` instead of raw constants for cleaner code.
+
+### Breaking Changes
+
+- **`Executor::temp_dir()` removed** from the trait — no longer part of the public executor interface. `NativeRuntime` gains a `temp_dir()` builder method instead.
+- **Native executor `name()` changed** from `"native_shell"` to `"shell"`.
+- **`tools_search` removed** from `DEFAULT_SKILL_TOOLS` — skill agents no longer receive `tools_search` by default.
+
+### Housekeeping
+
+- **Remove deprecated tests** — test modules removed from `extractor.rs` (106 lines) and `google.rs` (52 lines), both already marked `#[deprecated]` since 0.12.0.
+
 ## [0.12.2] — 2026-05-09
 
 ### Features

@@ -48,6 +48,8 @@ impl Default for ToolsSearch {
 }
 
 impl ToolsSearch {
+    pub const NAME: &'static str = TOOLS_SEARCH_NAME;
+
     pub fn new() -> Self {
         let tokenizer = jieba_tokenizer();
         Self { tokenizer }
@@ -77,7 +79,7 @@ impl ToolsSearch {
 
 impl Agent<AgentCtx> for ToolsSearch {
     fn name(&self) -> String {
-        TOOLS_SEARCH_NAME.to_string()
+        Self::NAME.to_string()
     }
 
     fn description(&self) -> String {
@@ -180,6 +182,8 @@ const MAX_SELECTOR_LIMIT: usize = 16;
 const MAX_SELECTOR_CANDIDATE_LIMIT: usize = 1000;
 
 impl ToolsSelect {
+    pub const NAME: &'static str = TOOLS_SELECT_NAME;
+
     pub fn new() -> Self {
         Self {
             tokenizer: jieba_tokenizer(),
@@ -253,7 +257,7 @@ impl ToolsSelect {
 
 impl Agent<AgentCtx> for ToolsSelect {
     fn name(&self) -> String {
-        TOOLS_SELECT_NAME.to_string()
+        Self::NAME.to_string()
     }
 
     fn description(&self) -> String {
