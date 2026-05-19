@@ -2,7 +2,7 @@
 
 All notable changes to the Anda project will be documented in this file.
 
-## [0.12.13] — 2026-05-17
+## [0.12.13] — 2026-05-19
 
 ### Changed — anda_engine v0.12.13
 
