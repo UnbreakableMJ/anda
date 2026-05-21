@@ -110,6 +110,7 @@ pub struct SubAgentManagerArgs {
     #[serde(default)]
     pub tags: Vec<String>,
 
+    #[serde(default, deserialize_with = "deserialize_optional_json_schema")]
     pub output_schema: Option<Json>,
 
     /// Optional task to run immediately after creating or updating the subagent.
@@ -123,6 +124,30 @@ pub struct SubAgentManagerArgs {
     /// Persist the subagent to storage so it remains available after restart.
     #[serde(default)]
     pub persist: bool,
+}
+
+fn deserialize_optional_json_schema<'de, D>(deserializer: D) -> Result<Option<Json>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<Json>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    match value {
+        Json::String(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                serde_json::from_str(value)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+        Json::Null => Ok(None),
+        value => Ok(Some(value)),
+    }
 }
 
 impl SubAgentManagerArgs {
@@ -815,8 +840,9 @@ impl SubAgentManager {
                         "default": []
                     },
                     "output_schema": {
-                        "type": ["object", "null"],
-                        "description": "Optional JSON schema that the subagent's output must conform to. Use this for machine-readable structured output."
+                        "type": ["string", "null"],
+                        "description": "Optional JSON schema encoded as a JSON string that the subagent's output must conform to. Use null for unstructured text output.",
+                        "default": null
                     },
                     "task": {
                         "type": "string",
@@ -1125,6 +1151,49 @@ mod tests {
             json!("")
         );
         assert_eq!(definition.parameters["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn subagents_manager_definition_uses_strict_safe_output_schema() {
+        let definition = SubAgentManager::new()
+            .definition()
+            .normalize_strict_parameters();
+
+        assert_eq!(
+            definition.parameters["properties"]["output_schema"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(definition.parameters["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn subagents_manager_args_accept_json_encoded_output_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "summary": { "type": "string" }
+            },
+            "required": ["summary"],
+            "additionalProperties": false
+        });
+
+        let args = SubAgentManagerArgs::from_prompt(
+            json!({
+                "name": "structured_helper",
+                "description": "Creates structured output.",
+                "instructions": "Return structured output.",
+                "tools": [],
+                "tags": [],
+                "output_schema": serde_json::to_string(&schema).unwrap(),
+                "task": "",
+                "session": "",
+                "persist": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(args.output_schema, Some(schema));
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -108,6 +108,11 @@ fn normalize_message_item(item: MessageItem) -> Option<MessageItem> {
                 })
             }
         }
+        MessageItem::Reasoning {
+            encrypted_content: None,
+            ..
+        } => None,
+        MessageItem::ItemReference { .. } => None,
         item => Some(item),
     }
 }
@@ -121,6 +126,9 @@ pub(crate) fn raw_history_into(value: Json) -> Vec<MessageItem> {
                 && !msg.role.is_empty()
             {
                 message_into(msg)
+                    .into_iter()
+                    .filter_map(normalize_message_item)
+                    .collect()
             } else {
                 vec![MessageItem::Any(value)]
             }
@@ -2968,6 +2976,19 @@ mod tests {
             Some(MessageItem::Message { content, .. })
                 if matches!(content.first(), Some(ContentItem::OutputText { text }) if text == "legacy responses")
         ));
+
+        let items = raw_history_into(json!({
+            "type": "reasoning",
+            "id": "rs_022c4f1e6736eb98016a0f16d145b48191950615b7ca9fdfd3",
+            "summary": []
+        }));
+        assert!(items.is_empty());
+
+        let items = raw_history_into(json!({
+            "type": "item_reference",
+            "id": "rs_022c4f1e6736eb98016a0f16d145b48191950615b7ca9fdfd3"
+        }));
+        assert!(items.is_empty());
     }
 
     #[test]

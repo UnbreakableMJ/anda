@@ -55,20 +55,20 @@ fn normalize_schema_value(schema: &mut Value, is_root: bool) {
 }
 
 fn normalize_schema_object(map: &mut Map<String, Value>, is_root: bool) {
-    let is_object = map
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value == "object");
+    let is_object = schema_type_contains_object(map.get("type"));
 
     if is_root && is_object && !map.contains_key("properties") {
         map.insert("properties".to_string(), json!({}));
     }
 
+    if is_object {
+        map.entry("additionalProperties".to_string())
+            .or_insert(Value::Bool(false));
+    }
+
     if let Some(Value::Object(properties)) = map.get("properties") {
         let required = properties.keys().cloned().map(Value::String).collect();
         map.insert("required".to_string(), Value::Array(required));
-        map.entry("additionalProperties".to_string())
-            .or_insert(Value::Bool(false));
     }
 
     for key in ["properties", "$defs", "definitions", "patternProperties"] {
@@ -93,6 +93,16 @@ fn normalize_schema_object(map: &mut Map<String, Value>, is_root: bool) {
                 normalize_schema_value(child, false);
             }
         }
+    }
+}
+
+fn schema_type_contains_object(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(value)) => value == "object",
+        Some(Value::Array(values)) => values
+            .iter()
+            .any(|value| value.as_str().is_some_and(|value| value == "object")),
+        _ => false,
     }
 }
 
@@ -149,5 +159,30 @@ mod tests {
             schema["properties"]["items"]["items"]["additionalProperties"],
             false
         );
+    }
+
+    #[test]
+    fn test_normalize_strict_schema_handles_nullable_objects() {
+        let schema = normalize_strict_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "maybe": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "id": { "type": "string" }
+                    }
+                },
+                "empty": {
+                    "type": ["object", "null"]
+                }
+            }
+        }));
+
+        assert_eq!(
+            schema["properties"]["maybe"]["required"],
+            serde_json::json!(["id"])
+        );
+        assert_eq!(schema["properties"]["maybe"]["additionalProperties"], false);
+        assert_eq!(schema["properties"]["empty"]["additionalProperties"], false);
     }
 }

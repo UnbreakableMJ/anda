@@ -3,6 +3,18 @@
 All notable changes to the Anda project will be documented in this file.
 
 
+## [0.12.19] — 2026-05-21
+
+### Fixed — anda_core v0.12.3, anda_engine v0.12.19
+
+- **`normalize_schema_object` now correctly handles `["object", "null"]` types** — The `is_object` check previously only matched `"type": "object"`, missing nullable object schemas like `["object", "null"]`. New `schema_type_contains_object()` helper checks both string and array type values. Also, `additionalProperties: false` is now set for *all* object schemas, not only those with `properties` — so `{"type": ["object", "null"]}` without properties also gets it. Added test `test_normalize_strict_schema_handles_nullable_objects` covering both cases.
+- **OpenAI Responses v2: filter empty Reasoning and ItemReference from history** — `normalize_message_item` now returns `None` for `Reasoning` items with `encrypted_content: None` (empty reasoning blocks) and `ItemReference` items (by-ID references with no content). Previously these passed through as-is and could cause provider errors. `raw_history_into` now chains `.filter_map(normalize_message_item)` on the core `Message` history path too, which previously bypassed normalization.
+
+### Changed — anda_engine v0.12.19
+
+- **`output_schema` in subagents_manager now uses `["string", "null"]`** — The JSON schema is submitted as a JSON-encoded string instead of a nested object. This avoids the structured-output problems that nested object schemas cause with strict function-calling providers. Added `deserialize_optional_json_schema` custom deserializer that accepts JSON strings (parsed inline) or `null`. New tests: `subagents_manager_definition_uses_strict_safe_output_schema`, `subagents_manager_args_accept_json_encoded_output_schema`.
+
+
 ## [0.12.18] — 2026-05-21
 
 ### Changed — anda_engine v0.12.18
