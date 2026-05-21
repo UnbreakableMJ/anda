@@ -315,21 +315,27 @@ impl Tool<BaseCtx> for NoteTool {
                 "type": "object",
                 "properties": {
                     "action": {
-                        "type": "string",
-                        "enum": VALID_ACTIONS,
-                        "description": "Action to perform. Omit or use read to return the current notes.",
+                        "type": ["string", "null"],
+                        "enum": [
+                            NOTE_ACTION_READ,
+                            NOTE_ACTION_ADD,
+                            NOTE_ACTION_REPLACE,
+                            NOTE_ACTION_REMOVE,
+                            null
+                        ],
+                        "description": "Action to perform. Use null or read to return the current notes.",
                         "default": NOTE_ACTION_READ
                     },
                     "content": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": "Note content for add and replace."
                     },
                     "old_text": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": "Unique substring identifying the note to replace or remove."
                     }
                 },
-                "required": [],
+                "required": ["action", "content", "old_text"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -634,5 +640,34 @@ mod tests {
             .unwrap();
         assert!(reviewer.output.success);
         assert!(reviewer.output.notes.is_empty());
+    }
+
+    #[test]
+    fn definition_schema_avoids_anyof() {
+        let definition = NoteTool::new().definition();
+
+        assert!(
+            definition.parameters["properties"]["action"]
+                .get("anyOf")
+                .is_none()
+        );
+        assert_eq!(
+            definition.parameters["properties"]["action"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            definition.parameters["properties"]["action"]["enum"],
+            json!([
+                NOTE_ACTION_READ,
+                NOTE_ACTION_ADD,
+                NOTE_ACTION_REPLACE,
+                NOTE_ACTION_REMOVE,
+                null
+            ])
+        );
+        assert_eq!(
+            definition.parameters["required"],
+            json!(["action", "content", "old_text"])
+        );
     }
 }

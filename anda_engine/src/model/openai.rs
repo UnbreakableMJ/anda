@@ -1127,6 +1127,7 @@ fn responses_response_from_stream_events(
     events: Vec<types::StreamEvent>,
 ) -> Result<types::CompletionResponse, BoxError> {
     let mut last_response = None;
+    let mut output_items = BTreeMap::<usize, types::MessageItem>::new();
 
     for event in events {
         match event {
@@ -1137,11 +1138,20 @@ fn responses_response_from_stream_events(
             | types::StreamEvent::ResponseIncomplete { response } => {
                 last_response = Some(response);
             }
+            types::StreamEvent::ResponseOutputItemDone { output_index, item } => {
+                output_items.insert(output_index, item);
+            }
             _ => {}
         }
     }
 
     let mut response = last_response.ok_or("No streamed completion response")?;
+    if response.output.is_empty() && !output_items.is_empty() {
+        response.output = output_items
+            .into_values()
+            .map(|item| serde_json::to_value(item).unwrap_or(Json::Null))
+            .collect();
+    }
     response.parse_output();
     Ok(response)
 }
@@ -1388,7 +1398,9 @@ pub enum ToolDefinition {
 
 impl From<FunctionDefinition> for ToolDefinition {
     fn from(f: FunctionDefinition) -> Self {
-        Self::Function { function: f }
+        Self::Function {
+            function: f.normalize_strict_parameters(),
+        }
     }
 }
 
@@ -1438,8 +1450,17 @@ impl CompletionModel {
         Self {
             client,
             model: model.to_string(),
-            default_request: ChatCompletionRequest::default(),
+            default_request: ChatCompletionRequest {
+                store: Some(false),
+                ..Default::default()
+            },
         }
+    }
+
+    /// Sets whether the completion request should run in streaming mode
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.default_request.stream = Some(stream);
+        self
     }
 
     /// Sets a default request template for the model
@@ -1633,15 +1654,21 @@ impl CompletionModelV2 {
             client,
             default_request: types::CompletionRequest {
                 model: model.to_string(),
+                stream: Some(true),
                 additional_parameters: types::AdditionalParameters {
                     store: Some(false),
-                    reasoning: Some(types::Reasoning::default()),
                     ..Default::default()
                 },
                 ..Default::default()
             },
             model: model.to_string(),
         }
+    }
+
+    /// Sets whether the completion request should run in streaming mode
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.default_request.stream = Some(stream);
+        self
     }
 
     /// Sets a default request template for the model
@@ -1660,6 +1687,8 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
         let client = self.client.clone();
         let mut r = self.default_request.clone();
         r.model = self.model.clone();
+        r.stream = Some(true);
+        r.additional_parameters.store = Some(false);
 
         Box::pin(async move {
             let timestamp = unix_ms();
@@ -1669,8 +1698,9 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
                 r.instructions = Some(req.instructions);
             };
 
-            r.input
-                .extend(req.raw_history.into_iter().map(types::MessageItem::Any));
+            for raw in req.raw_history {
+                r.input.extend(types::raw_history_into(raw));
+            }
             let skip_raw = r.input.len();
 
             for msg in req.chat_history {
@@ -1723,16 +1753,19 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
                 r.tools = req
                     .tools
                     .into_iter()
-                    .map(|v| types::ToolDefinition::Function {
-                        name: v.name,
-                        description: if v.description.is_empty() {
-                            None
-                        } else {
-                            Some(v.description)
-                        },
-                        parameters: v.parameters,
-                        strict: v.strict.unwrap_or_default(),
-                        defer_loading: None,
+                    .map(|v| {
+                        let v = v.normalize_strict_parameters();
+                        types::ToolDefinition::Function {
+                            name: v.name,
+                            description: if v.description.is_empty() {
+                                None
+                            } else {
+                                Some(v.description)
+                            },
+                            parameters: v.parameters,
+                            strict: v.strict.unwrap_or_default(),
+                            defer_loading: None,
+                        }
                     })
                     .collect::<Vec<_>>();
                 r.tool_choice = Some(if req.tool_choice_required {
@@ -1786,15 +1819,15 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
 
                 if log_enabled!(Debug) {
                     log::debug!(
-                        model = r.model,
-                        request:serde = r,
-                        response:serde = res;
-                        "Completion response");
+                            model = r.model,
+                            request:serde = r,
+                            response:serde = res;
+                            "Completion response");
                 } else if res.maybe_failed() {
                     log::warn!(
-                        request:serde = r,
-                        response:serde = res;
-                        "Completion maybe failed");
+                            request:serde = r,
+                            response:serde = res;
+                            "Completion maybe failed");
                 }
 
                 if skip_raw > 0 {
@@ -1822,6 +1855,18 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
 mod tests {
     use super::*;
     use serde_json::{Map, json};
+
+    #[test]
+    fn response_v2_defaults_to_streaming_stateless_requests() {
+        let model =
+            Client::new("test-key", Some("http://localhost".into())).completion_model_v2("gpt-5.5");
+
+        assert_eq!(model.default_request.stream, Some(true));
+        assert_eq!(
+            model.default_request.additional_parameters.store,
+            Some(false)
+        );
+    }
 
     #[test]
     fn serializes_chat_completion_request_core_types() {
@@ -1876,7 +1921,12 @@ mod tests {
                     function: FunctionDefinition {
                         name: "lookup".into(),
                         description: "Look up a record".into(),
-                        parameters: json!({"type": "object"}),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": false
+                        }),
                         strict: Some(true),
                     },
                 },
@@ -2223,6 +2273,42 @@ mod tests {
         assert_eq!(output.content, "Hi");
         assert_eq!(output.usage.input_tokens, 4);
         assert_eq!(output.usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn aggregates_responses_stream_output_item_done_fallback() {
+        let events = vec![
+            serde_json::from_value::<types::StreamEvent>(json!({
+                "type": "response.created",
+                "response": {
+                    "id": "resp_stream_2",
+                    "created_at": 1741569957,
+                    "model": "gpt-5.5",
+                    "output": [],
+                    "status": "in_progress",
+                    "usage": null
+                }
+            }))
+            .unwrap(),
+            serde_json::from_value::<types::StreamEvent>(json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg_2",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Streamed"}]
+                }
+            }))
+            .unwrap(),
+        ];
+
+        let response = responses_response_from_stream_events(events).unwrap();
+        assert_eq!(response.output.len(), 1);
+
+        let output = response.try_into(vec![], vec![]).unwrap();
+        assert_eq!(output.content, "Streamed");
     }
 
     #[test]

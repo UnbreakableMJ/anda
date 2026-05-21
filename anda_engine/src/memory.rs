@@ -58,7 +58,8 @@ pub static FUNCTION_DEFINITION: LazyLock<FunctionDefinition> = LazyLock::new(|| 
                     "description": "An optional JSON object of key-value pairs used for safe substitution of placeholders in the command string(s). Placeholders should start with ':' (e.g., :name, :limit). IMPORTANT: A placeholder must represent a complete JSON value token (e.g., name: :name). Do not embed placeholders inside quoted strings (e.g., \"Hello :name\"), because substitution uses JSON serialization."
                 },
             },
-            "required": ["commands"]
+            "required": ["commands", "parameters"],
+            "additionalProperties": false
         }
     })).unwrap()
 });
@@ -1153,7 +1154,7 @@ impl Tool<BaseCtx> for ListConversationsTool {
                         "maximum": 100
                     }
                 },
-                "required": [],
+                "required": ["cursor", "limit"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -1251,7 +1252,7 @@ impl Tool<BaseCtx> for SearchConversationsTool {
                         "maximum": 100
                     }
                 },
-                "required": ["query"],
+                "required": ["query", "limit"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -1356,9 +1357,77 @@ impl MemoryTool {
 
     /// Creates a new SearchConversationsTool instance
     pub fn new(memory: Arc<MemoryManagement>) -> Self {
-        let schema = gen_schema_for::<MemoryToolArgs>();
+        let schema = memory_tool_schema();
         Self { memory, schema }
     }
+}
+
+fn memory_tool_schema() -> Json {
+    json!({
+        "type": "object",
+        "description": "Select one memory API action with type, then provide the fields used by that action. Fields not used by the selected type should be null.",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": [
+                    "GetResource",
+                    "GetConversation",
+                    "GetConversationDelta",
+                    "StopConversation",
+                    "SteerConversation",
+                    "FollowUpConversation",
+                    "DeleteConversation",
+                    "ListPrevConversations",
+                    "SearchConversations"
+                ],
+                "description": "Memory API action to perform."
+            },
+            "_id": {
+                "type": ["integer", "null"],
+                "description": "Resource or conversation ID. Required for actions that target a single resource or conversation."
+            },
+            "conversation": {
+                "type": ["integer", "null"],
+                "description": "Conversation ID containing the resource. Required for GetResource."
+            },
+            "messages_offset": {
+                "type": ["integer", "null"],
+                "description": "Messages offset for GetConversationDelta. Use 0 for the first delta read."
+            },
+            "artifacts_offset": {
+                "type": ["integer", "null"],
+                "description": "Artifacts offset for GetConversationDelta. Use 0 for the first delta read."
+            },
+            "message": {
+                "type": ["string", "null"],
+                "description": "Message used by SteerConversation or FollowUpConversation."
+            },
+            "cursor": {
+                "type": ["string", "null"],
+                "description": "Pagination cursor for ListPrevConversations. Use null for the first page."
+            },
+            "limit": {
+                "type": ["integer", "null"],
+                "description": "Maximum results for listing or searching conversations. Use null for the default."
+            },
+            "query": {
+                "type": ["string", "null"],
+                "description": "Search query for SearchConversations."
+            }
+        },
+        "required": [
+            "type",
+            "_id",
+            "conversation",
+            "messages_offset",
+            "artifacts_offset",
+            "message",
+            "cursor",
+            "limit",
+            "query"
+        ],
+        "additionalProperties": false
+    })
 }
 
 impl Tool<BaseCtx> for MemoryTool {
@@ -1581,5 +1650,27 @@ mod tests {
         assert_eq!(rt, r#"{"type":"GetConversation","_id":1}"#);
         let args1: MemoryToolArgs = serde_json::from_str(&rt).unwrap();
         assert_eq!(args, args1);
+
+        let strict_args: MemoryToolArgs = serde_json::from_value(json!({
+            "type": "GetConversation",
+            "_id": 1,
+            "conversation": null,
+            "messages_offset": null,
+            "artifacts_offset": null,
+            "message": null,
+            "cursor": null,
+            "limit": null,
+            "query": null
+        }))
+        .unwrap();
+        assert_eq!(strict_args, args);
+
+        let schema = memory_tool_schema();
+        let required = schema["required"].as_array().unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(required.len(), properties.len());
+        for key in properties.keys() {
+            assert!(required.iter().any(|item| item.as_str() == Some(key)));
+        }
     }
 }

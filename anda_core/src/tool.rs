@@ -669,7 +669,12 @@ mod tests {
             FunctionDefinition {
                 name: self.name(),
                 description: self.description(),
-                parameters: json!({"type": "object"}),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }),
                 strict: Some(true),
             }
         }
@@ -700,7 +705,12 @@ mod tests {
             FunctionDefinition {
                 name: self.name(),
                 description: self.description(),
-                parameters: json!({"type": "object"}),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }),
                 strict: Some(true),
             }
         }

@@ -103,13 +103,18 @@ impl CompletionModel {
     /// * `client` - Gemini client instance
     /// * `model` - Model identifier string
     pub fn new(client: Client, model: &str) -> Self {
-        let mut default_request = types::GenerateContentRequest::default();
-        default_request.generation_config.top_p = Some(0.95);
+        let default_request = types::GenerateContentRequest::default();
         Self {
             client,
             default_request,
             model: model.to_string(),
         }
+    }
+
+    /// Sets whether the completion request should run in streaming mode
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.default_request.stream = stream;
+        self
     }
 
     /// Sets a default request template for the model

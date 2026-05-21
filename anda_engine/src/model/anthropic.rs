@@ -139,6 +139,12 @@ impl CompletionModel {
         }
     }
 
+    /// Sets whether the completion request should run in streaming mode
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.default_request.stream = Some(stream);
+        self
+    }
+
     /// Sets a default request template for the model
     pub fn with_default_request(mut self, req: types::CreateMessageParams) -> Self {
         self.default_request = req;

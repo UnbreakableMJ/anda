@@ -99,7 +99,7 @@ impl Agent<AgentCtx> for ToolsSearch {
                         "default": 10,
                     }
                 },
-                "required": ["query"],
+                "required": ["query", "limit"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -282,7 +282,7 @@ impl Agent<AgentCtx> for ToolsSelect {
                         "description": "Maximum number of resolved callables to inject into the next turn. Defaults to `5`, and is capped at `16`."
                     }
                 },
-                "required": [],
+                "required": ["tools", "query", "limit"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -581,6 +581,7 @@ mod tests {
                     "properties": {
                         "input": { "type": "string" }
                     },
+                    "required": ["input"],
                     "additionalProperties": false
                 }),
                 strict: Some(true),
@@ -624,6 +625,7 @@ mod tests {
                 parameters: json!({
                     "type": "object",
                     "properties": {},
+                    "required": [],
                     "additionalProperties": false
                 }),
                 strict: Some(true),
@@ -719,13 +721,20 @@ mod tests {
             search_definition.parameters["additionalProperties"],
             json!(false)
         );
+        assert_eq!(
+            search_definition.parameters["required"],
+            json!(["query", "limit"])
+        );
 
         let select_definition = ToolsSelect::new().definition();
         assert_eq!(
             select_definition.parameters["properties"]["tools"]["uniqueItems"],
             json!(true)
         );
-        assert_eq!(select_definition.parameters["required"], json!([]));
+        assert_eq!(
+            select_definition.parameters["required"],
+            json!(["tools", "query", "limit"])
+        );
         assert_eq!(
             select_definition.parameters["additionalProperties"],
             json!(false)

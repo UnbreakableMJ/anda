@@ -1,6 +1,6 @@
 use anda_core::{
     AgentOutput, BoxError, ContentPart, Json, Message, Usage as ModelUsage,
-    inline_data_from_data_url, part_to_data_url,
+    inline_data_from_data_url, normalize_strict_schema, part_to_data_url,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, json};
@@ -44,6 +44,89 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(MessageContentInput::deserialize(deserializer)?.into())
+}
+
+fn is_response_output_role(role: &str) -> bool {
+    role.eq_ignore_ascii_case("assistant")
+}
+
+fn normalize_message_content(role: &str, content: Vec<ContentItem>) -> Vec<ContentItem> {
+    let is_output = is_response_output_role(role);
+    content
+        .into_iter()
+        .filter_map(|item| match (is_output, item) {
+            (true, ContentItem::Text { text }) | (true, ContentItem::OutputText { text }) => {
+                Some(ContentItem::OutputText { text })
+            }
+            (true, ContentItem::Refusal { refusal }) => Some(ContentItem::Refusal { refusal }),
+            (true, _) => None,
+            (false, ContentItem::Text { text }) | (false, ContentItem::OutputText { text }) => {
+                Some(ContentItem::Text { text })
+            }
+            (false, ContentItem::Refusal { refusal }) => Some(ContentItem::Text { text: refusal }),
+            (false, item) => Some(item),
+        })
+        .collect()
+}
+
+fn push_message_item(rt: &mut Vec<MessageItem>, role: &str, content: &mut Vec<ContentItem>) {
+    if content.is_empty() {
+        return;
+    }
+
+    let content = normalize_message_content(role, std::mem::take(content));
+    if !content.is_empty() {
+        rt.push(MessageItem::Message {
+            role: role.to_string(),
+            content,
+            status: None,
+            id: None,
+            phase: None,
+        });
+    }
+}
+
+fn normalize_message_item(item: MessageItem) -> Option<MessageItem> {
+    match item {
+        MessageItem::Message {
+            role,
+            content,
+            status,
+            id,
+            phase,
+        } => {
+            let content = normalize_message_content(&role, content);
+            if content.is_empty() {
+                None
+            } else {
+                Some(MessageItem::Message {
+                    role,
+                    content,
+                    status,
+                    id,
+                    phase,
+                })
+            }
+        }
+        item => Some(item),
+    }
+}
+
+pub(crate) fn raw_history_into(value: Json) -> Vec<MessageItem> {
+    let item = serde_json::from_value::<MessageItem>(value.clone())
+        .unwrap_or_else(|_| MessageItem::Any(value.clone()));
+    match item {
+        MessageItem::Any(value) => {
+            if let Ok(msg) = serde_json::from_value::<Message>(value.clone())
+                && !msg.role.is_empty()
+            {
+                message_into(msg)
+            } else {
+                vec![MessageItem::Any(value)]
+            }
+        }
+        item => normalize_message_item(item).into_iter().collect(),
+    }
 }
 
 /// The completion request type for OpenAI's Response API: <https://platform.openai.com/docs/api-reference/responses/create>
@@ -1427,16 +1510,7 @@ pub fn message_into(msg: Message) -> Vec<MessageItem> {
                 content.push(ContentItem::Text { text });
             }
             ContentPart::Reasoning { text } => {
-                if !content.is_empty() {
-                    rt.push(MessageItem::Message {
-                        role: msg.role.clone(),
-                        content,
-                        status: None,
-                        id: None,
-                        phase: None,
-                    });
-                    content = Vec::new();
-                }
+                push_message_item(&mut rt, &msg.role, &mut content);
                 rt.push(MessageItem::Reasoning {
                     id: "".to_string(),
                     summary: vec![ReasoningSummary::SummaryText { text }],
@@ -1493,16 +1567,7 @@ pub fn message_into(msg: Message) -> Vec<MessageItem> {
                 args,
                 call_id,
             } => {
-                if !content.is_empty() {
-                    rt.push(MessageItem::Message {
-                        role: msg.role.clone(),
-                        content,
-                        status: None,
-                        id: None,
-                        phase: None,
-                    });
-                    content = Vec::new();
-                }
+                push_message_item(&mut rt, &msg.role, &mut content);
                 rt.push(MessageItem::FunctionCall {
                     name,
                     arguments: serde_json::to_string(&args).unwrap_or_default(),
@@ -1515,16 +1580,7 @@ pub fn message_into(msg: Message) -> Vec<MessageItem> {
             ContentPart::ToolOutput {
                 output, call_id, ..
             } => {
-                if !content.is_empty() {
-                    rt.push(MessageItem::Message {
-                        role: msg.role.clone(),
-                        content,
-                        status: None,
-                        id: None,
-                        phase: None,
-                    });
-                    content = Vec::new();
-                }
+                push_message_item(&mut rt, &msg.role, &mut content);
                 rt.push(MessageItem::FunctionCallOutput {
                     output: FunctionCallOutput::String(
                         serde_json::to_string(&output).unwrap_or_default(),
@@ -1541,15 +1597,7 @@ pub fn message_into(msg: Message) -> Vec<MessageItem> {
         }
     }
 
-    if !content.is_empty() {
-        rt.push(MessageItem::Message {
-            role: msg.role,
-            content,
-            status: None,
-            id: None,
-            phase: None,
-        });
-    }
+    push_message_item(&mut rt, &msg.role, &mut content);
 
     rt
 }
@@ -2642,7 +2690,7 @@ impl TextConfig {
         Self {
             format: Some(TextFormat::JsonSchema(StructuredOutputsInput {
                 name: name.into(),
-                schema,
+                schema: normalize_strict_schema(schema),
                 description: None,
                 strict: Some(true),
             })),
@@ -2868,6 +2916,58 @@ mod tests {
         } else {
             panic!("items[4] should be Message");
         }
+    }
+
+    #[test]
+    fn message_into_uses_output_text_for_assistant_history() {
+        let items = message_into(Message {
+            role: "assistant".into(),
+            content: vec![ContentPart::Text {
+                text: "done".into(),
+            }],
+            ..Default::default()
+        });
+
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            MessageItem::Message { role, content, .. } => {
+                assert_eq!(role, "assistant");
+                assert_eq!(
+                    content,
+                    &vec![ContentItem::OutputText {
+                        text: "done".into()
+                    }]
+                );
+            }
+            _ => panic!("items[0] should be Message"),
+        }
+
+        let value = serde_json::to_value(&items[0]).unwrap();
+        assert_eq!(value["content"][0]["type"], "output_text");
+    }
+
+    #[test]
+    fn raw_history_normalizes_core_and_legacy_response_messages() {
+        let items = raw_history_into(json!({
+            "role": "assistant",
+            "content": [{"type": "Text", "text": "old core"}]
+        }));
+        assert!(matches!(
+            items.first(),
+            Some(MessageItem::Message { content, .. })
+                if matches!(content.first(), Some(ContentItem::OutputText { text }) if text == "old core")
+        ));
+
+        let items = raw_history_into(json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "input_text", "text": "legacy responses"}]
+        }));
+        assert!(matches!(
+            items.first(),
+            Some(MessageItem::Message { content, .. })
+                if matches!(content.first(), Some(ContentItem::OutputText { text }) if text == "legacy responses")
+        ));
     }
 
     #[test]

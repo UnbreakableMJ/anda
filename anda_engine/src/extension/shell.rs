@@ -375,7 +375,8 @@ impl Tool<BaseCtx> for ShellTool {
                         "default": false
                     }
                 },
-                "required": ["command"]
+                "required": ["command", "env_keys", "background"],
+                "additionalProperties": false
             }),
             strict: Some(true),
         }

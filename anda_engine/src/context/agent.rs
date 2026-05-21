@@ -1854,7 +1854,9 @@ mod tests {
                     "type": "object",
                     "properties": {
                         "input": {"type": "string"}
-                    }
+                    },
+                    "required": ["input"],
+                    "additionalProperties": false
                 }),
                 strict: Some(true),
             }
@@ -1901,7 +1903,12 @@ mod tests {
             FunctionDefinition {
                 name: "fail_tool".to_string(),
                 description: "Always fails".to_string(),
-                parameters: json!({"type": "object", "properties": {}}),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": false
+                }),
                 strict: Some(true),
             }
         }
@@ -2921,7 +2928,12 @@ mod tests {
                 FunctionDefinition {
                     name: "artifact_tool".to_string(),
                     description: "Returns artifacts".to_string(),
-                    parameters: json!({"type": "object", "properties": {}}),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": false
+                    }),
                     strict: Some(true),
                 }
             }

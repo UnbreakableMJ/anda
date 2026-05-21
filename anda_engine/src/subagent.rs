@@ -481,7 +481,7 @@ impl Agent<AgentCtx> for SubAgent {
             description: self.description(),
             parameters: json!({
                 "type": "object",
-                "description": "Run this subagent on a focused task. Omit session for normal blocking mode, or provide a session ID for non-blocking session mode with hook-delivered progress and final output.",
+                "description": "Run this subagent on a focused task. Leave session empty for normal blocking mode, or provide a session ID for non-blocking session mode with hook-delivered progress and final output.",
                 "properties": {
                     "prompt": {
                         "type": "string",
@@ -494,7 +494,7 @@ impl Agent<AgentCtx> for SubAgent {
                         "default": ""
                     },
                 },
-                "required": ["prompt"],
+                "required": ["prompt", "session"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -809,7 +809,7 @@ impl SubAgentManager {
                     "tools": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Optional whitelist of tool names the subagent may use. Include only the minimum tools it needs. Leave empty or omit this field to create a no-tool subagent.",
+                        "description": "Optional whitelist of tool names the subagent may use. Include only the minimum tools it needs. Leave empty to create a no-tool subagent.",
                         "default": [],
                         "uniqueItems": true
                     },
@@ -821,12 +821,12 @@ impl SubAgentManager {
                         "uniqueItems": true
                     },
                     "output_schema": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "description": "Optional JSON schema that the subagent's output must conform to. Use this for machine-readable structured output."
                     },
                     "task": {
                         "type": "string",
-                        "description": "Optional immediate task to run with the newly created or updated subagent. Omit this to only create or update the subagent.",
+                        "description": "Optional immediate task to run with the newly created or updated subagent. Leave empty to only create or update the subagent.",
                         "default": ""
                     },
                     "session": {
@@ -840,7 +840,7 @@ impl SubAgentManager {
                         "default": false
                     }
                 },
-                "required": ["name", "description", "instructions"],
+                "required": ["name", "description", "instructions", "tools", "tags", "output_schema", "task", "session", "persist"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -1123,7 +1123,7 @@ mod tests {
         assert_eq!(
             definition.parameters["description"],
             json!(
-                "Run this subagent on a focused task. Omit session for normal blocking mode, or provide a session ID for non-blocking session mode with hook-delivered progress and final output."
+                "Run this subagent on a focused task. Leave session empty for normal blocking mode, or provide a session ID for non-blocking session mode with hook-delivered progress and final output."
             )
         );
         assert_eq!(

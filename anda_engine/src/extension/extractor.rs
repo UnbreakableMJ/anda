@@ -43,7 +43,7 @@
 
 use anda_core::{
     Agent, AgentOutput, BoxError, CompletionFeatures, CompletionRequest, FunctionDefinition,
-    Resource, Tool, ToolOutput, root_schema_for,
+    Resource, Tool, ToolOutput, normalize_strict_schema, root_schema_for,
 };
 use schemars::JsonSchema;
 use serde_json::Value;
@@ -91,7 +91,7 @@ where
             .to_ascii_lowercase();
         SubmitTool {
             name,
-            schema: schema.to_value(),
+            schema: normalize_strict_schema(schema.to_value()),
             _t: PhantomData,
         }
     }

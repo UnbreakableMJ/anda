@@ -68,6 +68,9 @@ pub struct ModelConfig {
     /// provider-specific API-key header.
     #[serde(default)]
     pub bearer_auth: bool,
+
+    #[serde(default)]
+    pub stream: bool,
 }
 
 impl ModelConfig {
@@ -93,7 +96,8 @@ impl ModelConfig {
             "gemini" => Model::with_completer(Arc::new(
                 gemini::Client::new(&self.api_key, Some(self.api_base.clone()))
                     .with_client(http_client)
-                    .completion_model(&self.model),
+                    .completion_model(&self.model)
+                    .with_stream(self.stream),
             )),
             "anthropic" => {
                 let mut cli = anthropic::Client::new(&self.api_key, Some(self.api_base.clone()))
@@ -101,20 +105,24 @@ impl ModelConfig {
                 if self.bearer_auth {
                     cli = cli.with_bearer_auth(true);
                 }
-                Model::with_completer(Arc::new(cli.completion_model(&self.model)))
+                Model::with_completer(Arc::new(
+                    cli.completion_model(&self.model).with_stream(self.stream),
+                ))
             }
             "openai" => {
                 if self.model.starts_with("gpt") {
                     Model::with_completer(Arc::new(
                         openai::Client::new(&self.api_key, Some(self.api_base.clone()))
                             .with_client(http_client)
-                            .completion_model_v2(&self.model),
+                            .completion_model_v2(&self.model)
+                            .with_stream(self.stream),
                     ))
                 } else {
                     Model::with_completer(Arc::new(
                         openai::Client::new(&self.api_key, Some(self.api_base.clone()))
                             .with_client(http_client)
-                            .completion_model(&self.model),
+                            .completion_model(&self.model)
+                            .with_stream(self.stream),
                     ))
                 }
             }

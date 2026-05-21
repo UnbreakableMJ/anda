@@ -114,7 +114,8 @@ impl Tool<BaseCtx> for EditFileTool {
                         "description": "Maximum number of replacements to apply (default: 0, replace all matches)."
                     }
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["path", "old_string", "new_string", "limit"],
+                "additionalProperties": false
             }),
             strict: Some(true),
         }

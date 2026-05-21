@@ -105,7 +105,8 @@ impl Tool<BaseCtx> for SearchFileTool {
                         "description": "Maximum number of matches to return (default: 1000)"
                     }
                 },
-                "required": ["pattern"]
+                "required": ["pattern", "limit"],
+                "additionalProperties": false
             }),
             strict: Some(true),
         }

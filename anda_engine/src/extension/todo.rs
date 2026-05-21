@@ -331,7 +331,8 @@ impl TodoTool {
                 "with 3+ steps or when the user provides multiple tasks. ",
                 "This list is shared across the current agent and its subagents ",
                 "within the same session/context tree. ",
-                "Call with no parameters to read the current list.\n\n",
+                "Call with no parameters, or with todos=null in strict schemas, ",
+                "to read the current list.\n\n",
                 "Writing:\n",
                 "- Provide 'todos' array to create/update items\n",
                 "- merge=false (default): replace the entire list with a fresh plan\n",
@@ -373,8 +374,8 @@ impl Tool<BaseCtx> for TodoTool {
                 "type": "object",
                 "properties": {
                     "todos": {
-                        "type": "array",
-                        "description": "Task items to write. Omit to read current list.",
+                        "description": "Task items to write. Use null to read current list.",
+                        "type": ["array", "null"],
                         "items": {
                             "type": "object",
                             "properties": {
@@ -383,13 +384,19 @@ impl Tool<BaseCtx> for TodoTool {
                                     "description": "Unique item identifier"
                                 },
                                 "content": {
-                                    "type": "string",
-                                    "description": "Task description"
+                                    "type": ["string", "null"],
+                                    "description": "Task description. Use null to leave it unchanged when merge=true."
                                 },
                                 "status": {
-                                    "type": "string",
-                                    "enum": VALID_STATUSES,
-                                    "description": "Current status"
+                                    "type": ["string", "null"],
+                                    "enum": [
+                                        TODO_STATUS_PENDING,
+                                        TODO_STATUS_IN_PROGRESS,
+                                        TODO_STATUS_COMPLETED,
+                                        TODO_STATUS_CANCELLED,
+                                        null
+                                    ],
+                                    "description": "Current status. Use null to keep the existing status when merge=true."
                                 }
                             },
                             "required": ["id", "content", "status"],
@@ -402,7 +409,7 @@ impl Tool<BaseCtx> for TodoTool {
                         "default": false
                     }
                 },
-                "required": [],
+                "required": ["todos", "merge"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -635,5 +642,35 @@ mod tests {
 
         assert_eq!(third.output.summary.pending, 1);
         assert_eq!(third.output.todos[0].content, "plan carefully");
+    }
+
+    #[test]
+    fn definition_schema_avoids_anyof() {
+        let definition = TodoTool::new().definition();
+
+        assert!(
+            definition.parameters["properties"]["todos"]
+                .get("anyOf")
+                .is_none()
+        );
+        assert_eq!(
+            definition.parameters["properties"]["todos"]["type"],
+            json!(["array", "null"])
+        );
+        assert_eq!(
+            definition.parameters["properties"]["todos"]["items"]["properties"]["content"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            definition.parameters["properties"]["todos"]["items"]["properties"]["status"]["enum"],
+            json!([
+                TODO_STATUS_PENDING,
+                TODO_STATUS_IN_PROGRESS,
+                TODO_STATUS_COMPLETED,
+                TODO_STATUS_CANCELLED,
+                null
+            ])
+        );
+        assert_eq!(definition.parameters["required"], json!(["todos", "merge"]));
     }
 }

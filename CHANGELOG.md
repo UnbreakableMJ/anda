@@ -3,6 +3,26 @@
 All notable changes to the Anda project will be documented in this file.
 
 
+## [0.12.16] — 2026-05-21
+
+### Added — anda_core v0.12.2, anda_engine v0.12.16
+
+- **Strict schema normalization** — `normalize_strict_schema()` in `anda_core::json` recursively normalizes JSON schemas for strict function calling: rewrites `required` to contain every key in `properties`, defaults `additionalProperties` to `false`, and traverses nested schemas (`items`, `$defs`, `allOf`/`anyOf`/`oneOf`, `if`/`then`/`else`, `not`, etc.). New `FunctionDefinition::normalize_strict_parameters()` method calls this normalization when `strict: true`. All tool definitions (`ToolDefinition::from`, `CompletionRequest` tool-building) now go through this normalization path — ensuring consistent strict schemas regardless of provider.
+- **Model-level stream control** — Added `stream: bool` field to `ModelConfig` and `with_stream()` builder methods on all completion model types: Anthropic (`CreateMessageParams.stream`), Gemini (`GenerateContentRequest.stream`), OpenAI Chat Completions (`ChatCompletionRequest.stream`), and OpenAI Responses v2 (`CompletionRequest.stream`). Each provider's `CompletionModel::new()` now reads `self.stream` and sets the default request accordingly.
+- **OpenAI Responses v2 defaults to streaming** — The v2 model now defaults to `stream: true` with `store: false` for stateless requests. The original `reasoning` default parameter was removed.
+- **OpenAI Responses v2 message history normalization** — New `raw_history_into()` converts raw `Json` history into `MessageItem` values with proper role-aware normalization: core `Message` history is unwrapped via `message_into()`, legacy Responses `MessageItem::Message` records are normalized through `normalize_message_item()`, and unrecognized values pass through as `Any`. Assistant messages in history now use `output_text` content type (required by Responses API) rather than plain `text`. Content-type filtering distinguishes input (`text`) from output (`output_text`) based on role.
+- **OpenAI Responses v2 stream aggregation** — `responses_response_from_stream_events()` now handles `ResponseOutputItemDone` events: when the final response has an empty `output` array, output items collected from `done` events fill in via `output_index` ordering.
+
+### Changed — anda_core v0.12.2, anda_engine v0.12.16
+
+- **All tool schemas now declare complete `required` arrays** — Every tool definition schema lists all property keys in `required` with `additionalProperties: false`, including optional fields. Previously many tools omitted optional fields from `required`, which triggers strict schema validation failures with providers. Affected tools: `tools_search`, `tools_select`, `list_conversations`, `search_conversations`, `memory`, `note`, `todo`, `subagents_manager`, `read_file`, `write_file`, `edit_file`, `search_file`, `shell`, `extractor` (SubmitTool).
+- **`anyOf` avoidance in tool schemas** — `note` tool now uses `"type": ["string", "null"]` with inline `enum` containing `null` instead of `anyOf`-based union schemas. `todo` and `subagents_manager` tools similarly use `["array", "null"]` and `["object", "null"]` type arrays. These patterns avoid `anyOf` which many providers (especially Anthropic) reject in strict mode.
+- **Memory tool gets hand-written schema** — Replaced auto-generated schema with a manually crafted one that lists all 9 operation types in a flat `type` enum with all optional fields explicit, avoiding the nested discriminator pattern that produced invalid schemas across providers.
+- **Gemini default request** — Removed the hard-coded `top_p: 0.95` default from `CompletionModel::new()`.
+- **Subagent `session` description** — Changed from "Omit session" to "Leave session empty" to match strict schema nullability.
+- **All tests updated** — Test function definitions, schema assertions, and expected values updated to include full `required` arrays and `additionalProperties: false`.
+
+
 ## [0.12.15] — 2026-05-21
 
 ### Added — anda_engine v0.12.15

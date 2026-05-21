@@ -115,7 +115,8 @@ impl Tool<BaseCtx> for WriteFileTool {
                         "description": "Encoding of the content. Can be 'utf8' or 'base64'. Defaults to 'utf8'."
                     }
                 },
-                "required": ["path", "content"]
+                "required": ["path", "content", "encoding"],
+                "additionalProperties": false
             }),
             strict: Some(true),
         }

@@ -1730,13 +1730,26 @@ mod tests {
         let tool: Tool = FunctionDefinition {
             name: "lookup".to_string(),
             description: String::new(),
-            parameters: json!({"type": "object"}),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
             strict: Some(true),
         }
         .into();
         assert_eq!(tool.name, "lookup");
         assert!(tool.description.is_none());
-        assert_eq!(tool.input_schema, Some(json!({"type": "object"})));
+        assert_eq!(
+            tool.input_schema,
+            Some(json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }))
+        );
         assert!(tool.strict.is_none());
     }
 

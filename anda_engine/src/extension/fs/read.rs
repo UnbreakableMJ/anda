@@ -117,7 +117,8 @@ impl Tool<BaseCtx> for ReadFileTool {
                         "description": "Maximum number of UTF-8 text lines to return (default: 0, all remaining lines)"
                     }
                 },
-                "required": ["path"]
+                "required": ["path", "offset", "limit"],
+                "additionalProperties": false
             }),
             strict: Some(true),
         }

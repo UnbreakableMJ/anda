@@ -16,7 +16,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::Json;
+use crate::{Json, json::normalize_strict_schema};
 pub use ic_auth_types::{ByteArrayB64, ByteBufB64, Xid};
 
 mod completion;
@@ -777,6 +777,14 @@ impl FunctionDefinition {
         self.name = format!("{}{}", prefix, self.name);
         self
     }
+
+    /// Normalizes strict parameter schemas before sending them to providers.
+    pub fn normalize_strict_parameters(mut self) -> Self {
+        if self.strict.unwrap_or_default() {
+            self.parameters = normalize_strict_schema(self.parameters);
+        }
+        self
+    }
 }
 
 /// Estimates token count using a small, provider-independent heuristic.
@@ -1254,7 +1262,12 @@ mod tests {
         let definition = FunctionDefinition {
             name: "search".into(),
             description: "Find documents".into(),
-            parameters: json!({"type": "object"}),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+            }),
             strict: Some(true),
         }
         .name_with_prefix("tool_");
