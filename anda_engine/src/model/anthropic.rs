@@ -25,7 +25,7 @@ impl From<ModelEffort> for types::OutputEffort {
             ModelEffort::Low => Self::Medium,
             ModelEffort::Medium => Self::High,
             ModelEffort::High => Self::XHigh,
-            ModelEffort::XHigh => Self::Max,
+            ModelEffort::Max => Self::Max,
         }
     }
 }
@@ -482,6 +482,14 @@ impl CompletionFeaturesDyn for CompletionModel {
                 r.max_tokens = max_tokens as u32;
             }
 
+            if let Some(effort) = req.effort {
+                let output_config = r.output_config.get_or_insert(types::OutputConfig {
+                    effort: None,
+                    format: None,
+                });
+                output_config.effort = Some(effort.into());
+            }
+
             if let Some(stop) = req.stop {
                 r.stop_sequences = Some(stop);
             }
@@ -586,7 +594,7 @@ mod tests {
     fn completion_model_applies_default_effort() {
         let model = Client::new("test-key", Some("http://localhost".into()))
             .completion_model("claude-sonnet-4-6")
-            .with_effort(Some(ModelEffort::XHigh));
+            .with_effort(Some(ModelEffort::Max));
 
         assert_eq!(
             model.default_request.output_config.unwrap().effort,

@@ -1,7 +1,8 @@
 use anda_core::{
     Agent, AgentContext, AgentOutput, BoxError, CompletionFeatures, CompletionRequest, ContentPart,
-    FunctionDefinition, Json, Message, Path, PromptCommand, PutMode, Resource, StoreFeatures,
-    ToolOutput, Usage, prompt_with_resources, select_resources, validate_function_name,
+    FunctionDefinition, Json, Message, ModelEffort, Path, PromptCommand, PutMode, Resource,
+    StoreFeatures, ToolOutput, Usage, prompt_with_resources, select_resources,
+    validate_function_name,
 };
 use async_trait::async_trait;
 use ciborium::from_reader;
@@ -64,6 +65,14 @@ pub struct SubAgent {
     #[serde(default)]
     pub output_schema: Option<Json>,
 
+    /// Optional default model label used to run this subagent.
+    #[serde(default)]
+    pub model: String,
+
+    /// Optional default reasoning/thinking effort used to run this subagent.
+    #[serde(default, deserialize_with = "deserialize_optional_model_effort")]
+    pub effort: Option<ModelEffort>,
+
     #[serde(skip)]
     pub subsessions: Arc<SubSessions>,
 }
@@ -91,6 +100,14 @@ impl SubAgent {
 
         if self.output_schema.is_some() {
             parts.push("Returns structured output.".to_string());
+        }
+
+        if let Some(model) = selected_model_label(&self.model) {
+            parts.push(format!("Default model label: {model}."));
+        }
+
+        if let Some(effort) = self.effort {
+            parts.push(format!("Default effort: {effort}."));
         }
 
         let sessions = self.subsessions.active_session_ids();
@@ -123,6 +140,15 @@ fn summarize_items(items: &[String], limit: usize) -> String {
     summary
 }
 
+fn selected_model_label(model: &str) -> Option<String> {
+    let model = model.trim();
+    if model.is_empty() {
+        None
+    } else {
+        Some(model.to_ascii_lowercase())
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SubAgentArgs {
     pub prompt: String,
@@ -144,6 +170,14 @@ pub struct SubAgentArgs {
     /// back into the completed subagent run.
     #[serde(default)]
     pub session: String,
+
+    /// Optional model label for this subagent run. When empty, the subagent default is used.
+    #[serde(default)]
+    pub model: String,
+
+    /// Optional reasoning/thinking effort for this subagent run.
+    #[serde(default, deserialize_with = "deserialize_optional_model_effort")]
+    pub effort: Option<ModelEffort>,
 }
 
 impl SubAgentArgs {
@@ -151,6 +185,8 @@ impl SubAgentArgs {
         serde_json::from_str::<Self>(&prompt).unwrap_or(Self {
             prompt,
             session: String::new(),
+            model: String::new(),
+            effort: None,
         })
     }
 }
@@ -179,6 +215,14 @@ pub struct SubAgentManagerArgs {
     #[serde(default, deserialize_with = "deserialize_optional_json_schema")]
     pub output_schema: Option<Json>,
 
+    /// Optional default model label used to run this subagent.
+    #[serde(default)]
+    pub model: String,
+
+    /// Optional default reasoning/thinking effort used to run this subagent.
+    #[serde(default, deserialize_with = "deserialize_optional_model_effort")]
+    pub effort: Option<ModelEffort>,
+
     /// Optional task to run immediately after creating or updating the subagent.
     #[serde(default)]
     pub task: String,
@@ -206,6 +250,8 @@ impl Default for SubAgentManagerArgs {
             tools: Vec::new(),
             tags: Vec::new(),
             output_schema: None,
+            model: String::new(),
+            effort: None,
             task: String::new(),
             session: String::new(),
             persist: false,
@@ -237,6 +283,34 @@ where
     }
 }
 
+fn deserialize_optional_model_effort<'de, D>(
+    deserializer: D,
+) -> Result<Option<ModelEffort>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<Json>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    match value {
+        Json::String(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                Ok(None)
+            } else {
+                serde_json::from_value(Json::String(value.to_ascii_lowercase()))
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+        Json::Null => Ok(None),
+        value => serde_json::from_value(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 impl SubAgentManagerArgs {
     fn from_prompt(prompt: String) -> Result<Self, BoxError> {
         serde_json::from_str::<Self>(&prompt)
@@ -255,6 +329,8 @@ impl SubAgentManagerArgs {
             tools: self.tools,
             tags: self.tags,
             output_schema: self.output_schema,
+            model: self.model.trim().to_string(),
+            effort: self.effort,
             ..Default::default()
         };
 
@@ -267,6 +343,8 @@ struct SubAgentInput {
     command: PromptCommand,
     resources: Vec<Resource>,
     usage: Usage,
+    model: Option<String>,
+    effort: Option<ModelEffort>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -303,6 +381,14 @@ impl SubSessionRunner {
         for mut input in inputs {
             // 累计来自于后台任务的工具使用情况
             self.runner.accumulate(&input.usage);
+
+            if input.model.is_some() {
+                self.runner.set_model(input.model.take());
+            }
+
+            if input.effort.is_some() {
+                self.runner.set_effort(input.effort);
+            }
 
             match input.command {
                 PromptCommand::Ping => {
@@ -385,6 +471,8 @@ impl SubSessionRunner {
                         chat_history: vec![compaction_msg.clone()],
                         tools: req.tools.clone(),
                         output_schema: req.output_schema.clone(),
+                        model: req.model.clone(),
+                        effort: req.effort,
                         ..Default::default()
                     };
 
@@ -467,6 +555,8 @@ impl AgentHook for SubSession {
                 command: PromptCommand::Plain { prompt },
                 resources: vec![],
                 usage: output.usage,
+                model: None,
+                effort: None,
             })
             .await
             .ok();
@@ -495,6 +585,8 @@ impl AgentHook for SubSession {
                 command: PromptCommand::Plain { prompt },
                 resources: vec![],
                 usage: output.usage,
+                model: None,
+                effort: None,
             })
             .await
             .ok();
@@ -542,6 +634,8 @@ impl ToolBackgroundHook for SubSession {
                 },
                 usage: output.usage,
                 resources: output.artifacts,
+                model: None,
+                effort: None,
             })
             .await
             .ok();
@@ -610,8 +704,19 @@ impl Agent<AgentCtx> for SubAgent {
                         "description": "Optional case-insensitive session ID. Leave empty for blocking one-shot work. Provide a stable ID for non-blocking, parallel, asynchronous, or follow-up work; reuse it to continue the same conversation.",
                         "default": ""
                     },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model label for this subagent run. Leave empty to use the subagent default model or the caller context model.",
+                        "default": ""
+                    },
+                    "effort": {
+                        "type": ["string", "null"],
+                        "enum": ["minimal", "low", "medium", "high", "xhigh", null],
+                        "description": "Optional reasoning/thinking effort for this subagent run. Use null to keep the subagent default.",
+                        "default": null
+                    },
                 },
-                "required": ["prompt", "session"],
+                "required": ["prompt", "session", "model", "effort"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -641,6 +746,8 @@ impl Agent<AgentCtx> for SubAgent {
         };
 
         let args = SubAgentArgs::from_prompt(prompt);
+        let model = selected_model_label(&args.model).or_else(|| selected_model_label(&self.model));
+        let effort = args.effort.or(self.effort);
 
         let session_id = args.session.trim().to_ascii_lowercase();
         if session_id.is_empty() {
@@ -657,6 +764,8 @@ impl Agent<AgentCtx> for SubAgent {
                             .unwrap_or_default(),
                         tools: ctx.definitions(Some(&self.tools)).await,
                         output_schema: self.output_schema.clone(),
+                        model,
+                        effort,
                         ..Default::default()
                     },
                     Vec::new(),
@@ -674,6 +783,8 @@ impl Agent<AgentCtx> for SubAgent {
             command: PromptCommand::from(args.prompt),
             resources,
             usage: Usage::default(),
+            model,
+            effort,
         };
 
         let subsessions = self.subsessions.clone();
@@ -707,7 +818,11 @@ impl Agent<AgentCtx> for SubAgent {
 
         // If the conversation session is not active, start a new session and process the prompt
         let SubAgentInput {
-            command, resources, ..
+            command,
+            resources,
+            model: input_model,
+            effort: input_effort,
+            ..
         } = input;
 
         let prompt = match command {
@@ -750,6 +865,8 @@ impl Agent<AgentCtx> for SubAgent {
                 .unwrap_or_default(),
             tools: ctx.definitions(Some(&self.tools)).await,
             output_schema: self.output_schema.clone(),
+            model: input_model,
+            effort: input_effort,
             ..Default::default()
         };
 
@@ -901,6 +1018,7 @@ impl SubAgentManager {
                 let callable = format!("SA_{name}");
                 let has_output_schema = agent.output_schema.is_some();
                 let active_sessions = agent.subsessions.active_session_ids();
+                let model = selected_model_label(&agent.model);
                 json!({
                     "name": name,
                     "callable": callable,
@@ -908,6 +1026,8 @@ impl SubAgentManager {
                     "tools": agent.tools,
                     "tags": agent.tags,
                     "has_output_schema": has_output_schema,
+                    "model": model,
+                    "effort": agent.effort,
                     "active_sessions": active_sessions,
                 })
             })
@@ -993,6 +1113,17 @@ impl SubAgentManager {
                         "description": "Optional JSON schema encoded as a JSON string that the subagent's output must conform to. Use null for unstructured text output.",
                         "default": null
                     },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional default model label used to run this subagent. Leave empty to use the caller context model. For operation=list, use an empty string.",
+                        "default": ""
+                    },
+                    "effort": {
+                        "type": ["string", "null"],
+                        "enum": ["minimal", "low", "medium", "high", "xhigh", null],
+                        "description": "Optional default reasoning/thinking effort used to run this subagent. Use null to leave the selected model's default effort unchanged. For operation=list, use null.",
+                        "default": null
+                    },
                     "task": {
                         "type": "string",
                         "description": "Optional immediate task handoff to run with the newly created or updated subagent. Include objective, context/resources, constraints, dependencies, expected deliverable, and success criteria. Leave empty to only create/update or when operation=list.",
@@ -1009,7 +1140,7 @@ impl SubAgentManager {
                         "default": false
                     }
                 },
-                "required": ["operation", "name", "description", "instructions", "tools", "tags", "output_schema", "task", "session", "persist"],
+                "required": ["operation", "name", "description", "instructions", "tools", "tags", "output_schema", "model", "effort", "task", "session", "persist"],
                 "additionalProperties": false
             }),
             strict: Some(true),
@@ -1082,6 +1213,8 @@ impl Agent<AgentCtx> for SubAgentManager {
             "name": name,
             "callable": callable,
             "persisted": persist,
+            "model": selected_model_label(&agent.model),
+            "effort": agent.effort,
             "active_sessions": agent.subsessions.active_session_ids(),
             "hint": "Call the subagent by this callable name. Use a stable session ID for long-running, parallel, asynchronous, or follow-up tasks. If a temporary subagent proves useful, call subagents_manager again with persist=true to save it."
         });
@@ -1095,6 +1228,8 @@ impl Agent<AgentCtx> for SubAgentManager {
         let prompt = serde_json::to_string(&SubAgentArgs {
             prompt: task,
             session,
+            model: String::new(),
+            effort: None,
         })?;
 
         match agent.run(ctx.child(&name, &name)?, prompt, resources).await {
@@ -1261,7 +1396,7 @@ pub fn needs_compaction(runner: &CompletionRunner) -> bool {
 mod tests {
     use super::*;
     use crate::engine::EngineBuilder;
-    use crate::model::{CompletionFeaturesDyn, Model};
+    use crate::model::{CompletionFeaturesDyn, Model, Models};
     use anda_core::BoxPinFut;
     use async_trait::async_trait;
     use parking_lot::Mutex;
@@ -1355,6 +1490,33 @@ mod tests {
                 content,
                 usage: Usage {
                     input_tokens,
+                    output_tokens: 1,
+                    cached_tokens: 0,
+                    requests: 1,
+                },
+                ..Default::default()
+            })))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingRequestCompleter {
+        name: &'static str,
+        requests: Arc<Mutex<Vec<CompletionRequest>>>,
+    }
+
+    impl CompletionFeaturesDyn for RecordingRequestCompleter {
+        fn model_name(&self) -> String {
+            self.name.to_string()
+        }
+
+        fn completion(&self, req: CompletionRequest) -> BoxPinFut<Result<AgentOutput, BoxError>> {
+            let content = request_text(&req);
+            self.requests.lock().push(req);
+            Box::pin(futures::future::ready(Ok(AgentOutput {
+                content,
+                usage: Usage {
+                    input_tokens: 1,
                     output_tokens: 1,
                     cached_tokens: 0,
                     requests: 1,
@@ -1482,6 +1644,8 @@ mod tests {
                 "type": "object",
                 "additionalProperties": false
             })),
+            model: Some("flash".to_string()),
+            effort: Some(ModelEffort::High),
             ..Default::default()
         };
 
@@ -1509,6 +1673,8 @@ mod tests {
 
         let role_before_compaction = runner.runner.req().role.clone();
         let output_schema_before_compaction = runner.runner.req().output_schema.clone();
+        let model_before_compaction = runner.runner.req().model.clone();
+        let effort_before_compaction = runner.runner.req().effort;
 
         assert!(runner.run(Vec::new()).await.unwrap());
 
@@ -1534,6 +1700,8 @@ mod tests {
             runner.runner.req().output_schema,
             output_schema_before_compaction
         );
+        assert_eq!(runner.runner.req().model, model_before_compaction);
+        assert_eq!(runner.runner.req().effort, effort_before_compaction);
         assert!(runner.runner.req().prompt.is_empty());
         assert!(runner.runner.req().content.is_empty());
         assert!(runner.last_output.is_none());
@@ -1546,6 +1714,8 @@ mod tests {
                     },
                     resources: Vec::new(),
                     usage: Usage::default(),
+                    model: None,
+                    effort: None,
                 }])
                 .await
                 .unwrap()
@@ -1578,6 +1748,8 @@ mod tests {
             description: "Handles recurring research tasks with concise synthesis.".to_string(),
             instructions: "Research carefully and synthesize findings.".to_string(),
             tools: vec!["google_web_search".to_string()],
+            model: "pro".to_string(),
+            effort: Some(ModelEffort::High),
             ..Default::default()
         };
 
@@ -1594,6 +1766,8 @@ mod tests {
                 .description
                 .contains("Allowed tools: google_web_search.")
         );
+        assert!(definition.description.contains("Default model label: pro."));
+        assert!(definition.description.contains("Default effort: high."));
         assert_eq!(
             definition.parameters["description"],
             json!(
@@ -1609,6 +1783,14 @@ mod tests {
         assert_eq!(
             definition.parameters["properties"]["session"]["default"],
             json!("")
+        );
+        assert_eq!(
+            definition.parameters["properties"]["model"]["default"],
+            json!("")
+        );
+        assert_eq!(
+            definition.parameters["properties"]["effort"]["enum"],
+            json!(["minimal", "low", "medium", "high", "xhigh", null])
         );
         assert_eq!(definition.parameters["additionalProperties"], json!(false));
     }
@@ -1626,6 +1808,14 @@ mod tests {
         assert_eq!(
             definition.parameters["properties"]["operation"]["default"],
             json!("upsert")
+        );
+        assert_eq!(
+            definition.parameters["properties"]["model"]["default"],
+            json!("")
+        );
+        assert_eq!(
+            definition.parameters["properties"]["effort"]["type"],
+            json!(["string", "null"])
         );
         assert!(
             definition.parameters["required"]
@@ -1655,6 +1845,8 @@ mod tests {
                 "tools": [],
                 "tags": [],
                 "output_schema": serde_json::to_string(&schema).unwrap(),
+                "model": "Pro",
+                "effort": "HIGH",
                 "task": "",
                 "session": "",
                 "persist": false
@@ -1665,6 +1857,51 @@ mod tests {
 
         assert_eq!(args.operation, "upsert");
         assert_eq!(args.output_schema, Some(schema));
+        assert_eq!(args.model, "Pro");
+        assert_eq!(args.effort, Some(ModelEffort::High));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subagent_run_allows_model_and_effort_selection() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let models = Arc::new(Models::default());
+        models.set_model(Model::with_completer(Arc::new(EchoCompleter)));
+        models.set(
+            "analysis".to_string(),
+            Model::with_completer(Arc::new(RecordingRequestCompleter {
+                name: "analysis-model",
+                requests: requests.clone(),
+            })),
+        );
+        let ctx = EngineBuilder::new().with_models(models).mock_ctx();
+        let agent = SubAgent {
+            name: "analysis_helper".to_string(),
+            description: "Runs analysis work.".to_string(),
+            instructions: "Analyze carefully.".to_string(),
+            ..Default::default()
+        };
+
+        let output = agent
+            .run(
+                ctx,
+                serde_json::to_string(&SubAgentArgs {
+                    prompt: "inspect this".to_string(),
+                    session: String::new(),
+                    model: "analysis".to_string(),
+                    effort: Some(ModelEffort::High),
+                })
+                .unwrap(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.content, "inspect this");
+        assert_eq!(output.model.as_deref(), Some("analysis-model"));
+        let recorded = requests.lock().clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].model.as_deref(), Some("analysis"));
+        assert_eq!(recorded[0].effort, Some(ModelEffort::High));
     }
 
     #[test]
@@ -1724,6 +1961,8 @@ mod tests {
                 serde_json::to_string(&SubAgentArgs {
                     prompt: "session task".to_string(),
                     session: "ThreadA".to_string(),
+                    model: String::new(),
+                    effort: None,
                 })
                 .unwrap(),
                 Vec::new(),
@@ -1772,6 +2011,8 @@ mod tests {
             instructions: "Break work into concrete steps.".to_string(),
             tools: vec!["tools_select".to_string()],
             tags: vec!["planning".to_string()],
+            model: "flash".to_string(),
+            effort: Some(ModelEffort::Low),
             ..Default::default()
         };
         let (sender, _rx) = tokio::sync::mpsc::channel(4);
@@ -1802,6 +2043,8 @@ mod tests {
         assert_eq!(content["count"], json!(1));
         assert_eq!(content["subagents"][0]["name"], json!("planner"));
         assert_eq!(content["subagents"][0]["callable"], json!("SA_planner"));
+        assert_eq!(content["subagents"][0]["model"], json!("flash"));
+        assert_eq!(content["subagents"][0]["effort"], json!("low"));
         assert_eq!(
             content["subagents"][0]["active_sessions"],
             json!(["plan-1"])
@@ -1828,6 +2071,8 @@ mod tests {
                 instructions: "Review code changes and summarize findings.".to_string(),
                 tools: vec!["read_file".to_string(), "grep_search".to_string()],
                 tags: vec!["code".to_string(), "review".to_string()],
+                model: "pro".to_string(),
+                effort: Some(ModelEffort::Medium),
                 ..Default::default()
             },
             SubAgent {
@@ -1899,6 +2144,8 @@ mod tests {
             assert_eq!(loaded.tools, expected.tools);
             assert_eq!(loaded.tags, expected.tags);
             assert_eq!(loaded.output_schema, expected.output_schema);
+            assert_eq!(loaded.model, expected.model);
+            assert_eq!(loaded.effort, expected.effort);
         }
     }
 }

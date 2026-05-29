@@ -29,8 +29,8 @@ use anda_core::{
     Agent, AgentContext, AgentInput, AgentOutput, AgentSet, BaseContext, BoxError, BoxPinFut,
     CacheExpiry, CacheFeatures, CacheStoreFeatures, CancellationToken, CanisterCaller,
     CompletionFeatures, CompletionRequest, ContentPart, FunctionDefinition, HttpFeatures, Json,
-    KeysFeatures, Message, ObjectMeta, Path, PutMode, PutResult, RequestMeta, Resource,
-    StateFeatures, StoreFeatures, ToolCall, ToolInput, ToolOutput, ToolSet, Usage,
+    KeysFeatures, Message, ModelEffort, ObjectMeta, Path, PutMode, PutResult, RequestMeta,
+    Resource, StateFeatures, StoreFeatures, ToolCall, ToolInput, ToolOutput, ToolSet, Usage,
 };
 use bytes::Bytes;
 use candid::{CandidType, Principal, utils::ArgumentEncoder};
@@ -194,9 +194,10 @@ impl AgentCtx {
         req: CompletionRequest,
         resources: Vec<Resource>,
     ) -> CompletionRunner {
+        let label = req.model.as_deref().unwrap_or(&self.label);
         let model = self
             .models
-            .get_model()
+            .resolve(label)
             .unwrap_or_else(Model::not_implemented);
         CompletionRunner {
             ctx: self,
@@ -1120,6 +1121,16 @@ impl CompletionRunner {
         self.implicit_context = Some(message);
     }
 
+    /// Selects the model label to use for subsequent completion turns.
+    pub fn set_model(&mut self, model: Option<String>) {
+        self.req.model = model;
+    }
+
+    /// Selects the reasoning/thinking effort to use for subsequent completion turns.
+    pub fn set_effort(&mut self, effort: Option<ModelEffort>) {
+        self.req.effort = effort;
+    }
+
     /// Accumulate usage from an intermediate step into the runner's total usage.
     pub fn accumulate(&mut self, other: &Usage) {
         self.total_usage.accumulate(other);
@@ -1407,7 +1418,7 @@ impl CompletionRunner {
         }
 
         let label = req.model.as_ref().unwrap_or(&self.ctx.label);
-        if let Some(model) = self.ctx.models.get(label) {
+        if let Some(model) = self.ctx.models.resolve(label) {
             self.model = model;
         }
 

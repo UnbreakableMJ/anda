@@ -32,6 +32,8 @@ pub use reqwest::Proxy;
 
 use crate::APP_USER_AGENT;
 
+pub use anda_core::ModelEffort;
+
 /// Serializable configuration for constructing a model adapter.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct ModelConfig {
@@ -78,17 +80,6 @@ pub struct ModelConfig {
 
     #[serde(default)]
     pub stream: bool,
-}
-
-/// Provider-agnostic reasoning/thinking effort requested by model config.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelEffort {
-    Minimal,
-    Low,
-    Medium,
-    High,
-    XHigh,
 }
 
 impl ModelConfig {
@@ -656,11 +647,11 @@ mod tests {
             "model": "gpt-5",
             "api_base": "http://localhost",
             "api_key": "test-key",
-            "effort": "xhigh"
+            "effort": "max"
         }))
         .unwrap();
 
-        assert_eq!(config.effort, Some(ModelEffort::XHigh));
+        assert_eq!(config.effort, Some(ModelEffort::Max));
         assert_eq!(
             serde_json::to_value(ModelEffort::Minimal).unwrap(),
             "minimal"

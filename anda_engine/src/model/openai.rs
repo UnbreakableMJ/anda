@@ -358,7 +358,7 @@ impl From<ModelEffort> for ReasoningEffort {
             ModelEffort::Low => Self::Low,
             ModelEffort::Medium => Self::Medium,
             ModelEffort::High => Self::High,
-            ModelEffort::XHigh => Self::XHigh,
+            ModelEffort::Max => Self::XHigh,
         }
     }
 }
@@ -370,7 +370,7 @@ impl From<ModelEffort> for types::ReasoningEffort {
             ModelEffort::Low => Self::Low,
             ModelEffort::Medium => Self::Medium,
             ModelEffort::High => Self::High,
-            ModelEffort::XHigh => Self::XHigh,
+            ModelEffort::Max => Self::XHigh,
         }
     }
 }
@@ -1577,6 +1577,10 @@ impl CompletionFeaturesDyn for CompletionModel {
                 r.max_tokens = Some(max_tokens as u64);
             }
 
+            if let Some(effort) = req.effort {
+                r.reasoning_effort = Some(effort.into());
+            }
+
             if let Some(json_schema) = req.output_schema {
                 r.response_format = Some(ResponseFormat::JsonSchema { json_schema });
             }
@@ -1798,6 +1802,18 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
                 r.max_output_tokens = Some(max_tokens as u64);
             }
 
+            if let Some(effort) = req.effort {
+                let reasoning = r
+                    .additional_parameters
+                    .reasoning
+                    .get_or_insert(types::Reasoning {
+                        effort: None,
+                        generate_summary: None,
+                        summary: None,
+                    });
+                reasoning.effort = Some(effort.into());
+            }
+
             if let Some(output_schema) = req.output_schema {
                 r.additional_parameters.text = Some(types::TextConfig::structured_output(
                     "structured_output".to_string(),
@@ -1940,7 +1956,7 @@ mod tests {
     fn response_completion_model_applies_default_effort() {
         let model = Client::new("test-key", Some("http://localhost".into()))
             .completion_model_v2("gpt-5.5")
-            .with_effort(Some(ModelEffort::XHigh));
+            .with_effort(Some(ModelEffort::Max));
 
         let reasoning = model
             .default_request

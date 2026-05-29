@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, fmt};
 
 use crate::{
     AgentOutput, BoxError, ContentPart, Document, Documents, FunctionDefinition, Json, Message,
@@ -16,6 +17,35 @@ pub trait CompletionFeatures: Sized {
 
     /// Returns the name of the model.
     fn model_name(&self) -> String;
+}
+
+/// Provider-agnostic reasoning/thinking effort requested for a completion.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl ModelEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+}
+
+impl fmt::Display for ModelEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Provider-neutral completion request.
@@ -62,8 +92,11 @@ pub struct CompletionRequest {
     /// The stop sequence to be sent to the completion model provider.
     pub stop: Option<Vec<String>>,
 
-    /// The name of the model to be used for the completion request.
+    /// The name or label of the model to be used for the completion request.
     pub model: Option<String>,
+
+    /// Optional reasoning/thinking effort for providers and models that support it.
+    pub effort: Option<ModelEffort>,
 }
 
 impl CompletionRequest {

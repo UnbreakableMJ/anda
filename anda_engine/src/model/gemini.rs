@@ -25,7 +25,7 @@ impl From<ModelEffort> for types::ThinkingLevel {
             ModelEffort::Low => Self::Low,
             ModelEffort::Medium => Self::Medium,
             ModelEffort::High => Self::High,
-            ModelEffort::XHigh => Self::High,
+            ModelEffort::Max => Self::High,
         }
     }
 }
@@ -343,6 +343,14 @@ impl CompletionFeaturesDyn for CompletionModel {
 
             if let Some(max_tokens) = req.max_output_tokens {
                 r.generation_config.max_output_tokens = Some(max_tokens as i32);
+            }
+
+            if let Some(effort) = req.effort {
+                let thinking_config = r
+                    .generation_config
+                    .thinking_config
+                    .get_or_insert_with(types::ThinkingConfig::default);
+                thinking_config.thinking_level = Some(effort.into());
             }
 
             if let Some(output_schema) = req.output_schema {
