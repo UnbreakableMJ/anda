@@ -391,6 +391,34 @@ pub enum ContentPart {
     Any(Json),
 }
 
+impl ContentPart {
+    /// Creates a content part of type `Any` with the given type tag and value.
+    pub fn any_from<T>(ty: &str, val: T) -> Self
+    where
+        T: Serialize,
+    {
+        let mut val = json!(val);
+        val.as_object_mut()
+            .map(|map| map.insert("type".to_string(), ty.into()));
+        ContentPart::Any(val)
+    }
+
+    /// Attempts to convert this content part of type `Any` into the specified type if the type tag matches.
+    pub fn any_into<T>(self, ty: &str) -> Result<T, Box<Self>>
+    where
+        T: DeserializeOwned,
+    {
+        if let ContentPart::Any(val) = &self
+            && let Some(t) = val.get("type").and_then(|x| x.as_str())
+            && t == ty
+        {
+            serde_json::from_value::<T>(val.clone()).map_err(|_| Box::new(self))
+        } else {
+            Err(Box::new(self))
+        }
+    }
+}
+
 /// Converts a content part with inline data to a data URL string.
 ///
 /// See <https://developer.mozilla.org/en-US/docs/Web/URI/Reference/Schemes/data>.
@@ -1632,6 +1660,66 @@ mod tests {
                 .as_ref()
                 .and_then(|meta| meta.get("priority")),
             Some(&json!(3))
+        );
+    }
+
+    #[test]
+    fn test_content_part_any_from_and_any_into_resource() {
+        let mut metadata = Map::new();
+        metadata.insert("source".into(), json!("upload"));
+        metadata.insert("priority".into(), json!(3));
+
+        let resource = Resource {
+            _id: 42,
+            name: "note.txt".into(),
+            tags: vec!["text".into(), "note".into()],
+            description: Some("A note resource".into()),
+            uri: Some("file:///tmp/note.txt".into()),
+            mime_type: Some("text/plain".into()),
+            blob: Some(b"hello world".to_vec().into()),
+            size: Some(11),
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+
+        let part = ContentPart::any_from("Resource", &resource);
+        let expected = json!({
+            "type": "Resource",
+            "_id": 42,
+            "name": "note.txt",
+            "tags": ["text", "note"],
+            "description": "A note resource",
+            "uri": "file:///tmp/note.txt",
+            "mime_type": "text/plain",
+            "blob": "aGVsbG8gd29ybGQ=",
+            "size": 11,
+            "metadata": {
+                "source": "upload",
+                "priority": 3
+            }
+        });
+        assert_eq!(part, ContentPart::Any(expected));
+
+        let resource_back = part.clone().any_into::<Resource>("Resource").unwrap();
+        assert_eq!(resource_back._id, resource._id);
+        assert_eq!(resource_back.name, resource.name);
+        assert_eq!(resource_back.tags, resource.tags);
+        assert_eq!(resource_back.description, resource.description);
+        assert_eq!(resource_back.uri, resource.uri);
+        assert_eq!(resource_back.mime_type, resource.mime_type);
+        assert_eq!(resource_back.blob, resource.blob);
+        assert_eq!(resource_back.size, resource.size);
+        assert_eq!(resource_back.metadata, resource.metadata);
+
+        assert_eq!(
+            part.clone().any_into::<Resource>("OtherType"),
+            Err(Box::new(part.clone()))
+        );
+
+        let invalid = ContentPart::any_from("Resource", "plain-text");
+        assert_eq!(
+            invalid.clone().any_into::<Resource>("Resource"),
+            Err(Box::new(invalid))
         );
     }
 

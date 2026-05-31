@@ -2,8 +2,13 @@
 
 All notable changes to the Anda project will be documented in this file.
 
+## [0.12.25] — 2026-05-31
 
+### Added — anda_core v0.12.5
 
+- **`ContentPart::any_from` and `any_into` helpers** — New typed constructors for `ContentPart::Any`: `any_from::<T>(ty, val)` builds a `ContentPart::Any` JSON value with a `"type"` field, and `any_into::<T>(ty)` deserializes it back, verifying the type tag and returning `Err(self)` on mismatch. Enables type-safe round-trips for structured JSON content (e.g. `Resource`) without routing through specific provider types.
+
+- **`test_content_part_any_from_and_any_into_resource`** — New test in `anda_core/src/model.rs` validates round-trip serialization of `Resource` through `ContentPart::Any`, covering all fields including `blob` (base64), `metadata`, `uri`, and `mime_type`. Also verifies type mismatch returns `Err` and non-`Resource` input is rejected.
 
 ## [0.12.25] — 2026-05-31
 
