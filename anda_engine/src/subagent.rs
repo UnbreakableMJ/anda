@@ -371,6 +371,70 @@ struct SubSessionRunner {
 }
 
 impl SubSessionRunner {
+    fn with_session(&self, mut output: AgentOutput) -> AgentOutput {
+        if output.session.is_none() {
+            output.session = Some(self.session.id.clone());
+        }
+
+        output
+    }
+
+    fn has_observable_output(output: &AgentOutput) -> bool {
+        !output.content.is_empty()
+            || output.thoughts.is_some()
+            || output.failed_reason.is_some()
+            || !output.tool_calls.is_empty()
+            || !output.chat_history.is_empty()
+            || !output.artifacts.is_empty()
+            || output.conversation.is_some()
+            || output.model.is_some()
+            || output.usage.requests > 0
+            || !output.tools_usage.is_empty()
+    }
+
+    fn latest_output(&mut self) -> AgentOutput {
+        let output = self
+            .last_output
+            .take()
+            .or_else(|| self.runner.last_output().cloned())
+            .unwrap_or_default();
+
+        self.with_session(output)
+    }
+
+    async fn finalize_output(&mut self) -> AgentOutput {
+        let fallback = self.latest_output();
+
+        match self.runner.finalize(None).await {
+            Ok(output) => self.with_session(output),
+            Err(err) => {
+                if Self::has_observable_output(&fallback) {
+                    fallback
+                } else {
+                    self.with_session(AgentOutput {
+                        failed_reason: Some(err.to_string()),
+                        ..Default::default()
+                    })
+                }
+            }
+        }
+    }
+
+    fn record_failed_output(&mut self, failed_reason: impl Into<String>) -> String {
+        let mut failed_reason = failed_reason.into();
+        if failed_reason.trim().is_empty() {
+            failed_reason = "subagent session cancelled".to_string();
+        }
+
+        let mut output = self.latest_output();
+        output.content.clear();
+        output.thoughts = None;
+        output.failed_reason = Some(failed_reason.clone());
+
+        self.last_output = Some(output);
+        failed_reason
+    }
+
     // returns true if the conversation should continue to be active after processing the inputs, or false if it should be terminated
     async fn run(&mut self, inputs: Vec<SubAgentInput>) -> Result<bool, BoxError> {
         let mut cancellation_requested: Option<String> = None;
@@ -417,6 +481,7 @@ impl SubSessionRunner {
         }
 
         if let Some(failed_reason) = cancellation_requested {
+            let failed_reason = self.record_failed_output(failed_reason);
             return Err(failed_reason.into());
         }
 
@@ -447,12 +512,21 @@ impl SubSessionRunner {
 
                 if needs_compaction(&self.runner) {
                     // 上下文过长，先进行一次压缩总结，更新conversation状态和历史消息，再继续后续的处理
-                    let output = self
+                    let output = match self
                         .runner
                         .finalize(Some(COMPACTION_PROMPT.to_string()))
-                        .await?;
+                        .await
+                    {
+                        Ok(output) => output,
+                        Err(err) => {
+                            let failed_reason = self.record_failed_output(err.to_string());
+                            return Err(failed_reason.into());
+                        }
+                    };
 
-                    if let Some(failed_reason) = output.failed_reason {
+                    if let Some(failed_reason) = output.failed_reason.clone() {
+                        let output = self.with_session(output);
+                        self.last_output = Some(output);
                         return Err(failed_reason.into());
                     }
                     // 前一轮压缩总结的内容作为新 conversation 的第一条消息，继续后续的交互
@@ -500,7 +574,7 @@ impl SubSessionRunner {
             }
 
             Err(err) => {
-                let failed_reason = err.to_string();
+                let failed_reason = self.record_failed_output(err.to_string());
                 Err(failed_reason.into())
             }
         }
@@ -905,24 +979,18 @@ impl Agent<AgentCtx> for SubAgent {
                         // continue the subsession
                     }
                     Ok(false) => {
+                        let output = runner.finalize_output().await;
                         if let Some(hook) = &runner.agent_hook {
-                            hook.on_background_end(
-                                runner.runner.ctx(),
-                                session.id.clone(),
-                                runner.last_output.take().unwrap_or_default(),
-                            )
-                            .await;
+                            hook.on_background_end(runner.runner.ctx(), session.id.clone(), output)
+                                .await;
                         }
                         break;
                     }
                     Err(err) => {
+                        let output = runner.latest_output();
                         if let Some(hook) = &runner.agent_hook {
-                            hook.on_background_end(
-                                runner.runner.ctx(),
-                                session.id.clone(),
-                                runner.last_output.take().unwrap_or_default(),
-                            )
-                            .await;
+                            hook.on_background_end(runner.runner.ctx(), session.id.clone(), output)
+                                .await;
                         }
                         log::error!("Error processing session {}: {:?}", session.id, err);
                         break;
@@ -1396,12 +1464,12 @@ impl SubAgentSet for SubAgentSetManager {
 
 pub fn needs_compaction(runner: &CompletionRunner) -> bool {
     let current_usage = runner.current_usage();
-    let threshold = runner
-        .model()
-        .context_window
-        .saturating_mul(8)
-        .saturating_div(10)
-        .max(100_000) as u64;
+    let context_window = runner.model().context_window as u64;
+    let threshold = if context_window == 0 {
+        100_000
+    } else {
+        context_window.saturating_mul(8).saturating_div(10).max(1)
+    };
 
     current_usage.input_tokens >= threshold || runner.turns() >= MAX_TURNS_TO_COMPACT
 }
@@ -1607,6 +1675,22 @@ mod tests {
         high_runner.next().await.unwrap().unwrap();
         assert_eq!(high_runner.current_usage().input_tokens, 100_000);
         assert!(needs_compaction(&high_runner));
+
+        let mut small_context_model =
+            Model::with_completer(Arc::new(UsageCompleter { input_tokens: 800 }));
+        small_context_model.context_window = 1_000;
+        let small_context_ctx = EngineBuilder::new()
+            .with_model(small_context_model)
+            .mock_ctx();
+        let mut small_context_runner = small_context_ctx.completion_iter(
+            CompletionRequest {
+                prompt: "near small context limit".to_string(),
+                ..Default::default()
+            },
+            Vec::new(),
+        );
+        small_context_runner.next().await.unwrap().unwrap();
+        assert!(needs_compaction(&small_context_runner));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1753,6 +1837,103 @@ mod tests {
             vec!["compacted handoff".to_string()]
         );
         assert_eq!(request_text(&recorded[2]), "continue after compaction");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subsession_runner_keeps_latest_output_for_final_end_after_progress() {
+        let model = Model::with_completer(Arc::new(EchoCompleter));
+        let ctx = EngineBuilder::new().with_model(model).mock_ctx();
+
+        let req = CompletionRequest {
+            prompt: "seed task".to_string(),
+            ..Default::default()
+        };
+
+        let (sender, _rx) = tokio::sync::mpsc::channel(4);
+        let session = Arc::new(SubSession {
+            id: "session-1".to_string(),
+            agent: "worker".to_string(),
+            sender,
+            background_tasks: Arc::new(RwLock::new(HashMap::new())),
+            active_at: AtomicU64::new(unix_ms()),
+        });
+
+        let mut runner = SubSessionRunner {
+            session,
+            agent_hook: None,
+            runner: ctx.completion_iter(req, Vec::new()).unbound(),
+            last_output: None,
+        };
+
+        assert!(runner.run(Vec::new()).await.unwrap());
+        assert_eq!(
+            runner
+                .last_output
+                .as_ref()
+                .map(|output| output.content.as_str()),
+            Some("seed task")
+        );
+
+        let progress_output = runner.last_output.take().unwrap();
+        assert_eq!(progress_output.content, "seed task");
+
+        let final_output = runner.finalize_output().await;
+        assert_eq!(final_output.content, "seed task");
+        assert_eq!(final_output.session.as_deref(), Some("session-1"));
+        assert!(final_output.failed_reason.is_none());
+        assert!(runner.runner.is_done());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subsession_runner_reports_cancel_failure_as_latest_output() {
+        let model = Model::with_completer(Arc::new(EchoCompleter));
+        let ctx = EngineBuilder::new().with_model(model).mock_ctx();
+
+        let req = CompletionRequest {
+            prompt: "seed task".to_string(),
+            ..Default::default()
+        };
+
+        let (sender, _rx) = tokio::sync::mpsc::channel(4);
+        let session = Arc::new(SubSession {
+            id: "session-1".to_string(),
+            agent: "worker".to_string(),
+            sender,
+            background_tasks: Arc::new(RwLock::new(HashMap::new())),
+            active_at: AtomicU64::new(unix_ms()),
+        });
+
+        let mut runner = SubSessionRunner {
+            session,
+            agent_hook: None,
+            runner: ctx.completion_iter(req, Vec::new()).unbound(),
+            last_output: None,
+        };
+
+        assert!(runner.run(Vec::new()).await.unwrap());
+
+        let err = runner
+            .run(vec![SubAgentInput {
+                command: PromptCommand::Command {
+                    command: "cancel".to_string(),
+                    prompt: "stop because requested".to_string(),
+                },
+                resources: Vec::new(),
+                usage: Usage::default(),
+                model: None,
+                effort: None,
+            }])
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "stop because requested");
+        let final_output = runner.latest_output();
+        assert_eq!(
+            final_output.failed_reason.as_deref(),
+            Some("stop because requested")
+        );
+        assert_eq!(final_output.session.as_deref(), Some("session-1"));
+        assert!(final_output.content.is_empty());
     }
 
     #[test]

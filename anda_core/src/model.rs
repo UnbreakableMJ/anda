@@ -610,10 +610,12 @@ impl TryFrom<Resource> for ContentPart {
         if res.blob.as_ref().map(|v| !v.0.is_empty()).unwrap_or(false)
             && let Some(data) = res.blob
         {
-            match String::from_utf8(data.0) {
-                Ok(text) => Ok(ContentPart::Text { text }),
-                Err(v) => {
-                    let data: ByteBufB64 = v.into_bytes().into();
+            match utf8_text_from_bytes(&data.0) {
+                Some(text) => Ok(ContentPart::Text {
+                    text: text.to_owned(),
+                }),
+                None => {
+                    let data: ByteBufB64 = data.0.into();
                     let mime_type = res.mime_type.unwrap_or_else(|| {
                         infer2::get(&data)
                             .map(|t| t.mime_type())
@@ -865,15 +867,19 @@ impl From<&Resource> for Document {
             ("id".to_string(), res._id.into()),
             ("type".to_string(), "Resource".into()),
         ]);
-        if let Json::Object(mut val) = json!(res) {
-            val.remove("blob");
+
+        let mut rr = ResourceRef::from(res);
+        rr.blob = None; // blob content is not included in metadata
+        if let Json::Object(val) = json!(rr) {
             metadata.extend(val);
         };
 
-        Self {
-            metadata,
-            content: Json::Null,
-        }
+        let content = match res.blob.as_ref().and_then(|b| utf8_text_from_bytes(&b.0)) {
+            Some(text) => text.into(),
+            None => Json::Null,
+        };
+
+        Self { metadata, content }
     }
 }
 
@@ -1015,15 +1021,10 @@ pub fn prompt_with_resources(prompt: String, resources: &mut Vec<Resource>) -> S
 pub fn text_resource_documents(resources: &mut Vec<Resource>) -> Vec<Document> {
     let res = select_resources(resources, &["text".to_string(), "md".to_string()]);
     let mut user_resources: Vec<Document> = Vec::with_capacity(res.len());
-    for resource in res {
-        if let Some(content) = resource
-            .blob
-            .and_then(|blob| String::from_utf8(blob.0).ok())
-        {
-            user_resources.push(Document::from_text(
-                resource._id.to_string().as_str(),
-                &content,
-            ));
+    for resource in &res {
+        let doc = Document::from(resource);
+        if doc.content != Json::Null {
+            user_resources.push(doc);
         }
     }
 
@@ -1059,6 +1060,31 @@ fn decode_percent_encoded_bytes(input: &str) -> Option<ByteBufB64> {
     }
 
     Some(decoded.into())
+}
+
+/// Attempts to decode the given byte slice as UTF-8 text and checks if it looks like text content.
+pub fn utf8_text_from_bytes(data: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(data).ok()?;
+    looks_like_text(text).then_some(text)
+}
+
+/// Attempts to decode the given byte vector as UTF-8 text and checks if it looks like text content.
+pub fn utf8_text_from(data: Vec<u8>) -> Option<String> {
+    let text = String::from_utf8(data).ok()?;
+    looks_like_text(&text).then_some(text)
+}
+
+fn looks_like_text(text: &str) -> bool {
+    let mut sampled = 0usize;
+    let mut suspicious = 0usize;
+    for ch in text.chars().take(4096) {
+        sampled += 1;
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            suspicious += 1;
+        }
+    }
+
+    sampled == 0 || suspicious * 100 / sampled <= 5
 }
 
 #[cfg(test)]
@@ -1338,12 +1364,14 @@ mod tests {
         assert_eq!(doc.metadata.get("id"), Some(&json!(9)));
         assert_eq!(doc.metadata.get("type"), Some(&json!("Resource")));
         assert_eq!(doc.metadata.get("_id"), Some(&json!(9)));
+        assert_eq!(doc.metadata.get("name"), Some(&json!("note")));
+        assert_eq!(doc.metadata.get("tags"), Some(&json!(["text"])));
         assert_eq!(
             doc.metadata.get("uri"),
             Some(&json!("file:///tmp/note.txt"))
         );
         assert!(!doc.metadata.contains_key("blob"));
-        assert_eq!(doc.content, Json::Null);
+        assert_eq!(doc.content, json!("hello"));
     }
 
     #[test]
@@ -1409,7 +1437,19 @@ mod tests {
         ];
 
         let docs = text_resource_documents(&mut resources);
-        assert_eq!(docs, vec![Document::from_text("1", "alpha")]);
+        assert_eq!(
+            docs,
+            vec![Document {
+                metadata: BTreeMap::from([
+                    ("_id".to_string(), json!(1)),
+                    ("id".to_string(), json!(1)),
+                    ("name".to_string(), json!("resource-1")),
+                    ("tags".to_string(), json!(["text"])),
+                    ("type".to_string(), json!("Resource")),
+                ]),
+                content: json!("alpha"),
+            }]
+        );
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0]._id, 3);
 

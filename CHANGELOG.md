@@ -8,6 +8,12 @@ All notable changes to the Anda project will be documented in this file.
 
 - **Removed fallback model support** — Removed the `fallback_model` registry slot from `Models`, the `with_fallback_model()` builder API, the `fallback_model()` accessor, fallback routing from `get_model()` and `resolve()`, and all fallback-related completion logic in `CompletionRunner::step()`. A `fallback` label is now an ordinary label with no special runtime behavior. Model routing uses the primary model plus explicit labels only.
 - **Refactored response body reading** — Replaced `response.text().await` + `serde_json::from_str` with `response.bytes().await` + `serde_json::from_slice` across OpenAI, Anthropic, and Gemini completions. Error messages now use `String::from_utf8_lossy` for safer non-UTF-8 body display.
+- **Improved subagent output lifecycle** — Added `with_session()`, `latest_output()`, `finalize_output()`, and `record_failed_output()` helpers to `SubSessionRunner` for consistent session tracking and error reporting. Cancellation failures and compaction errors now properly record their output before returning errors. Fixed `needs_compaction()` panic on `context_window == 0` by treating it as unlimited. Added 3 new tests for output lifecycle and edge cases.
+
+### Added — anda_core v0.12.6
+
+- **`utf8_text_from_bytes()` and `utf8_text_from()`** — New text-detection helpers that check for excessive control characters (≤5%) in the first 4KB before treating a byte buffer as text. Prevents binary blobs from being incorrectly rendered as garbled text in `ContentPart` and `Document` conversions.
+- **Refined blob-to-text conversion** — `ContentPart::TryFrom<Resource>` and `Document::From<&Resource>` now use the new text-detection functions instead of naive `String::from_utf8`. `Document` conversion also uses `ResourceRef` to exclude `blob` from metadata and now correctly includes blob text content when detected as text.
 
 ## [0.12.27] — 2026-06-01
 
