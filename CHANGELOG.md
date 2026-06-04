@@ -2,6 +2,13 @@
 
 All notable changes to the Anda project will be documented in this file.
 
+## [0.12.28] — 2026-06-04
+
+### Changed — anda_engine v0.12.28
+
+- **Removed fallback model support** — Removed the `fallback_model` registry slot from `Models`, the `with_fallback_model()` builder API, the `fallback_model()` accessor, fallback routing from `get_model()` and `resolve()`, and all fallback-related completion logic in `CompletionRunner::step()`. A `fallback` label is now an ordinary label with no special runtime behavior. Model routing uses the primary model plus explicit labels only.
+- **Refactored response body reading** — Replaced `response.text().await` + `serde_json::from_str` with `response.bytes().await` + `serde_json::from_slice` across OpenAI, Anthropic, and Gemini completions. Error messages now use `String::from_utf8_lossy` for safer non-UTF-8 body display.
+
 ## [0.12.27] — 2026-06-01
 
 ### Changed — anda_engine v0.12.27

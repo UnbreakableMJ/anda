@@ -395,19 +395,21 @@ impl CompletionFeaturesDyn for CompletionModel {
                     let chunks = read_sse_json_events(response, &model).await?;
                     response_from_stream_chunks(chunks)?
                 } else {
-                    let text = response.text().await.map_err(|err| {
+                    let data = response.bytes().await.map_err(|err| {
                         format!(
                             "Failed to read completion response, model: {}, error: {}",
                             model, err
                         )
                     })?;
 
-                    match serde_json::from_str::<types::GenerateContentResponse>(&text) {
+                    match serde_json::from_slice::<types::GenerateContentResponse>(&data) {
                         Ok(res) => res,
                         Err(err) => {
                             return Err(format!(
                                 "Invalid completion response, model: {}, error: {}, body: {}",
-                                model, err, text
+                                model,
+                                err,
+                                String::from_utf8_lossy(&data)
                             )
                             .into());
                         }

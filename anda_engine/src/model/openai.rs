@@ -1643,13 +1643,13 @@ impl CompletionFeaturesDyn for CompletionModel {
                     let chunks = read_sse_json_events(response, &r.model).await?;
                     chat_completion_response_from_stream_chunks(chunks)?
                 } else {
-                    let text = response.text().await.map_err(|err| {
+                    let data = response.bytes().await.map_err(|err| {
                         format!(
                             "Failed to read completion response, model: {}, error: {}",
                             r.model, err
                         )
                     })?;
-                    match serde_json::from_str::<CompletionResponse>(&text) {
+                    match serde_json::from_slice::<CompletionResponse>(&data) {
                         Ok(mut res) => {
                             res.parse_output();
                             res
@@ -1657,7 +1657,9 @@ impl CompletionFeaturesDyn for CompletionModel {
                         Err(err) => {
                             return Err(format!(
                                 "Invalid completion response, model: {}, error: {}, body: {}",
-                                r.model, err, text
+                                r.model,
+                                err,
+                                String::from_utf8_lossy(&data)
                             )
                             .into());
                         }
@@ -1886,13 +1888,13 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
                     let events = read_sse_json_events(response, &r.model).await?;
                     responses_response_from_stream_events(events)?
                 } else {
-                    let text = response.text().await.map_err(|err| {
+                    let data = response.bytes().await.map_err(|err| {
                         format!(
                             "Failed to read completion response, model: {}, error: {}",
                             r.model, err
                         )
                     })?;
-                    match serde_json::from_str::<types::CompletionResponse>(&text) {
+                    match serde_json::from_slice::<types::CompletionResponse>(&data) {
                         Ok(mut res) => {
                             res.parse_output();
                             res
@@ -1900,7 +1902,9 @@ impl CompletionFeaturesDyn for CompletionModelV2 {
                         Err(err) => {
                             return Err(format!(
                                 "Invalid completion response, model: {}, error: {}, body: {}",
-                                r.model, err, text
+                                r.model,
+                                err,
+                                String::from_utf8_lossy(&data)
                             )
                             .into());
                         }

@@ -5,8 +5,8 @@
 //! Built-in providers currently include OpenAI-compatible APIs, Anthropic, and
 //! Google Gemini.
 //!
-//! The [`Models`] registry maps model labels such as `primary`, `fallback`,
-//! `pro`, `flash`, or `lite` to concrete [`Model`] instances. Labels let agents
+//! The [`Models`] registry maps model labels such as `primary`, `pro`,
+//! `flash`, or `lite` to concrete [`Model`] instances. Labels let agents
 //! request capability tiers without hard-coding provider model names.
 //!
 //! Custom providers can implement [`CompletionFeaturesDyn`] and be wrapped with
@@ -52,7 +52,7 @@ pub struct ModelConfig {
     /// Optional labels for selecting this model in the engine.
     ///
     /// If omitted, the provider model name is used as the only label. Common
-    /// labels include `primary`, `fallback`, `pro`, `flash`, `lite`, `audio`, `video`, `image`, `memory`.
+    /// labels include `primary`, `pro`, `flash`, `lite`, `audio`, `video`, `image`, `memory`.
     #[serde(default)]
     pub labels: Vec<String>,
 
@@ -156,19 +156,16 @@ impl ModelConfig {
 
 /// Thread-safe model registry used by the engine.
 ///
-/// It maintains three layers:
+/// It maintains two layers:
 /// - `model`: the primary default model for general requests
 /// - `models`: a label-based map for selecting specific models
-/// - `fallback_model`: a safety fallback when primary lookup is missing
 ///
-/// The dedicated primary and fallback slots can be set explicitly via
-/// [`Models::set_model`] and [`Models::set_fallback_model`], or derived from the
-/// special labels `primary` and `fallback` in the label map. This keeps direct
-/// lookup (`get`) separate from default-routing (`get_model`).
+/// The dedicated primary slot can be set explicitly via [`Models::set_model`]
+/// or derived from the special label `primary` in the label map. This keeps
+/// direct lookup (`get`) separate from default-routing (`get_model`).
 pub struct Models {
     model: ArcSwap<Option<Model>>,
     models: ArcSwap<HashMap<String, Vec<Model>>>,
-    fallback_model: ArcSwap<Option<Model>>,
 }
 
 impl Default for Models {
@@ -176,7 +173,6 @@ impl Default for Models {
         Self {
             model: ArcSwap::new(Arc::new(None)),
             models: ArcSwap::new(Arc::new(HashMap::new())),
-            fallback_model: ArcSwap::new(Arc::new(None)),
         }
     }
 }
@@ -194,7 +190,6 @@ impl Models {
         Self {
             model: ArcSwap::new(other.model.load_full()),
             models: ArcSwap::new(Arc::new(models)),
-            fallback_model: ArcSwap::new(other.fallback_model.load_full()),
         }
     }
 
@@ -230,17 +225,10 @@ impl Models {
         self.model.store(Arc::new(Some(model)));
     }
 
-    /// Sets the fallback model used when primary lookup fails without mutating
-    /// the label map.
-    pub fn set_fallback_model(&self, model: Model) {
-        self.inner_set(model.labels.clone(), model.clone());
-        self.fallback_model.store(Arc::new(Some(model)));
-    }
-
     /// Inserts or updates a single labeled model.
     ///
-    /// The special labels `primary` and `fallback` also update the dedicated
-    /// routing slots. If no primary exists yet, any inserted model is promoted
+    /// The special label `primary` also updates the dedicated routing slot.
+    /// If no primary exists yet, any inserted model is promoted
     /// to become the primary default.
     pub fn set(&self, label: String, model: Model) {
         self.inner_set(vec![label], model);
@@ -258,8 +246,6 @@ impl Models {
             label.make_ascii_lowercase();
             if label == "primary" {
                 self.model.store(Arc::new(Some(model.clone())));
-            } else if label == "fallback" {
-                self.fallback_model.store(Arc::new(Some(model.clone())));
             }
 
             match models.entry(label) {
@@ -278,8 +264,7 @@ impl Models {
 
     /// Returns a model by lowercase label if it exists.
     ///
-    /// This is a direct lookup only and never falls back to the primary or
-    /// fallback slots.
+    /// This is a direct lookup only and never falls back to default routing.
     pub fn get(&self, label: &str) -> Option<Model> {
         self.models
             .load()
@@ -287,13 +272,10 @@ impl Models {
             .and_then(|v| v.last().cloned())
     }
 
-    /// Returns the primary model if available; otherwise returns the fallback
-    /// model, and finally any remaining labeled model.
+    /// Returns the primary model if available; otherwise returns any remaining
+    /// labeled model.
     pub fn get_model(&self) -> Option<Model> {
         if let Some(m) = self.model.load().as_ref() {
-            return Some(m.clone());
-        }
-        if let Some(m) = self.fallback_model.load().as_ref() {
             return Some(m.clone());
         }
         self.models
@@ -301,11 +283,6 @@ impl Models {
             .values()
             .next()
             .and_then(|v| v.last().cloned())
-    }
-
-    /// Returns the configured fallback model if one exists.
-    pub fn fallback_model(&self) -> Option<Model> {
-        self.fallback_model.load().as_ref().clone()
     }
 
     /// Resolves a model for lowercase-label-aware routing.
@@ -658,7 +635,6 @@ mod tests {
         assert!(models.get_model().is_none());
         assert!(models.get("missing").is_none());
         assert!(models.resolve("missing").is_none());
-        assert!(models.fallback_model().is_none());
     }
 
     #[test]
@@ -674,7 +650,6 @@ mod tests {
             "primary"
         );
         assert!(models.get("primary").is_some());
-        assert!(models.fallback_model().is_none());
     }
 
     #[test]
@@ -696,38 +671,38 @@ mod tests {
     }
 
     #[test]
-    fn fallback_is_used_when_primary_or_label_missing() {
+    fn fallback_label_has_no_default_routing_semantics() {
         let models = Models::default();
-        models.set_fallback_model(test_model("fallback"));
+        models.set_model(test_model("primary"));
+        models.set("fallback".to_string(), test_model("fallback"));
 
         assert_eq!(
             models
-                .get_model()
-                .expect("fallback should be returned when primary is missing")
+                .get("fallback")
+                .expect("fallback is still a normal label")
                 .model_name(),
             "fallback"
+        );
+        assert_eq!(
+            models
+                .get_model()
+                .expect("primary model should stay the default")
+                .model_name(),
+            "primary"
         );
         assert_eq!(
             models
                 .resolve("unknown")
-                .expect("fallback should be returned when label is missing")
+                .expect("missing label should use default routing")
                 .model_name(),
-            "fallback"
-        );
-        assert_eq!(
-            models
-                .fallback_model()
-                .expect("fallback slot should be set")
-                .model_name(),
-            "fallback"
+            "primary"
         );
     }
 
     #[test]
-    fn resolve_prefers_exact_label_then_fallback_then_default() {
+    fn resolve_prefers_exact_label_then_default() {
         let models = Models::default();
         models.set_model(test_model("primary"));
-        models.set_fallback_model(test_model("fallback"));
         models.set("flash".to_string(), test_model("flash"));
 
         assert_eq!(
@@ -740,7 +715,7 @@ mod tests {
         assert_eq!(
             models
                 .resolve("missing")
-                .expect("missing label should use fallback")
+                .expect("missing label should use default routing")
                 .model_name(),
             "primary"
         );

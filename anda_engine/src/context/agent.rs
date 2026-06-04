@@ -1428,34 +1428,6 @@ impl CompletionRunner {
         self.current_usage = output.usage.clone();
         self.accumulate(&output.usage);
 
-        // If the primary model returns a failed result (failed_reason exists),
-        // and a fallback model is configured, switch to the fallback model and retry.
-        // After switching, subsequent steps will keep using the fallback model.
-        if output.failed_reason.is_some()
-            && let Some(fallback) = self.ctx.models.fallback_model()
-        {
-            let primary_reason = output
-                .failed_reason
-                .clone()
-                .unwrap_or_else(|| "unknown error".to_string());
-
-            self.model = fallback;
-            let mut output2 = self.model.completion(self.req.clone()).await?;
-            output2.model = Some(self.model.model_name());
-            self.current_usage = output2.usage.clone();
-            self.accumulate(&output2.usage);
-
-            if let Some(fallback_reason) = output2.failed_reason {
-                output2.failed_reason = Some(format!(
-                    "primary model failed: {}; fallback model failed: {}",
-                    primary_reason, fallback_reason
-                ));
-                return Ok(Some(self.final_output(output2)));
-            }
-
-            output = output2;
-        }
-
         if output.failed_reason.is_some() {
             return Ok(Some(self.final_output(output)));
         }
@@ -1564,8 +1536,8 @@ impl Stream for CompletionStream {
 #[cfg(test)]
 mod tests {
     use anda_core::{
-        Agent, AgentOutput, BoxError, CancellationToken, CompletionFeatures, CompletionRequest,
-        FunctionDefinition, Resource, Tool, ToolCall, ToolOutput, Usage,
+        Agent, AgentOutput, BoxError, CancellationToken, CompletionRequest, FunctionDefinition,
+        Resource, Tool, ToolCall, ToolOutput, Usage,
     };
     use ciborium::from_reader;
     use futures_util::StreamExt;
@@ -1614,25 +1586,6 @@ mod tests {
         ) -> anda_core::BoxPinFut<Result<AgentOutput, BoxError>> {
             Box::pin(futures::future::ready(Ok(AgentOutput {
                 failed_reason: Some("primary failed".to_string()),
-                ..Default::default()
-            })))
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct AlwaysOkCompleter;
-
-    impl CompletionFeaturesDyn for AlwaysOkCompleter {
-        fn model_name(&self) -> String {
-            "always_ok".to_string()
-        }
-
-        fn completion(
-            &self,
-            _req: CompletionRequest,
-        ) -> anda_core::BoxPinFut<Result<AgentOutput, BoxError>> {
-            Box::pin(futures::future::ready(Ok(AgentOutput {
-                content: "from_fallback".to_string(),
                 ..Default::default()
             })))
         }
@@ -1790,26 +1743,6 @@ mod tests {
         }
     }
 
-    /// Completer where both primary and fallback fail.
-    #[derive(Clone, Debug)]
-    struct AlwaysFailCompleter2;
-
-    impl CompletionFeaturesDyn for AlwaysFailCompleter2 {
-        fn model_name(&self) -> String {
-            "always_fail_2".to_string()
-        }
-
-        fn completion(
-            &self,
-            _req: CompletionRequest,
-        ) -> anda_core::BoxPinFut<Result<AgentOutput, BoxError>> {
-            Box::pin(futures::future::ready(Ok(AgentOutput {
-                failed_reason: Some("fallback also failed".to_string()),
-                ..Default::default()
-            })))
-        }
-    }
-
     /// Completer that waits forever (for cancellation tests).
     #[derive(Clone, Debug)]
     struct SlowCompleter;
@@ -1963,26 +1896,6 @@ mod tests {
 
     // ── Tests ──
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn completion_falls_back_on_failed_reason() {
-        let primary = Model::with_completer(Arc::new(AlwaysFailCompleter));
-        let fallback = Model::with_completer(Arc::new(AlwaysOkCompleter));
-
-        let ctx = EngineBuilder::new()
-            .with_model(primary)
-            .with_fallback_model(fallback)
-            .mock_ctx();
-
-        let req = CompletionRequest {
-            prompt: "hello".to_string(),
-            ..Default::default()
-        };
-
-        let out = ctx.completion(req, Vec::<Resource>::new()).await.unwrap();
-        assert!(out.failed_reason.is_none());
-        assert_eq!(out.content, "from_fallback");
-    }
-
     // ── CompletionRunner basic tests ──
 
     #[tokio::test(flavor = "current_thread")]
@@ -2109,56 +2022,8 @@ mod tests {
         assert!(runner.next().await.unwrap().is_none());
     }
 
-    // ── Fallback model tests ──
-
     #[tokio::test(flavor = "current_thread")]
-    async fn runner_fallback_on_primary_failure() {
-        let primary = Model::with_completer(Arc::new(AlwaysFailCompleter));
-        let fallback = Model::with_completer(Arc::new(AlwaysOkCompleter));
-
-        let ctx = EngineBuilder::new()
-            .with_model(primary)
-            .with_fallback_model(fallback)
-            .mock_ctx();
-
-        let req = CompletionRequest {
-            prompt: "hello".to_string(),
-            ..Default::default()
-        };
-
-        let mut runner = ctx.completion_iter(req, Vec::new());
-        let output = runner.next().await.unwrap().unwrap();
-        assert!(runner.is_done());
-        assert_eq!(output.content, "from_fallback");
-        assert!(output.failed_reason.is_none());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn runner_both_primary_and_fallback_fail() {
-        let primary = Model::with_completer(Arc::new(AlwaysFailCompleter));
-        let fallback = Model::with_completer(Arc::new(AlwaysFailCompleter2));
-
-        let ctx = EngineBuilder::new()
-            .with_model(primary)
-            .with_fallback_model(fallback)
-            .mock_ctx();
-
-        let req = CompletionRequest {
-            prompt: "hello".to_string(),
-            ..Default::default()
-        };
-
-        let mut runner = ctx.completion_iter(req, Vec::new());
-        let output = runner.next().await.unwrap().unwrap();
-        assert!(runner.is_done());
-        assert!(output.failed_reason.is_some());
-        let reason = output.failed_reason.unwrap();
-        assert!(reason.contains("primary model failed"));
-        assert!(reason.contains("fallback model failed"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn runner_no_fallback_on_primary_failure() {
+    async fn runner_finishes_on_primary_failure() {
         let primary = Model::with_completer(Arc::new(AlwaysFailCompleter));
 
         let ctx = EngineBuilder::new().with_model(primary).mock_ctx();
@@ -2173,36 +2038,6 @@ mod tests {
         assert!(runner.is_done());
         assert!(output.failed_reason.is_some());
         assert_eq!(output.failed_reason.unwrap(), "primary failed");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn runner_fallback_used_only_once() {
-        // After fallback succeeds on step 1, step 2 should use the fallback model.
-        let primary = Model::with_completer(Arc::new(AlwaysFailCompleter));
-        let fallback = Model::with_completer(Arc::new(EchoCompleter));
-
-        let ctx = EngineBuilder::new()
-            .with_model(primary)
-            .with_fallback_model(fallback)
-            .mock_ctx();
-
-        let req = CompletionRequest {
-            prompt: "test".to_string(),
-            ..Default::default()
-        };
-
-        let mut runner = ctx.completion_iter(req, Vec::new());
-        // Set follow-up so the runner won't finish after step 1.
-        runner.follow_up("follow-up prompt".to_string());
-
-        let step1 = runner.next().await.unwrap().unwrap();
-        assert!(!runner.is_done());
-        assert_eq!(step1.content, "test"); // from EchoCompleter (fallback)
-
-        // Step 2 uses fallback model (now primary) and processes follow-up.
-        let step2 = runner.next().await.unwrap().unwrap();
-        assert!(runner.is_done());
-        assert_eq!(step2.content, "follow-up prompt"); // echo from fallback model
     }
 
     // ── Model error propagation ──

@@ -18,7 +18,7 @@ Full API documentation is available on [docs.rs][docs].
 
 - Agent and tool registration with scoped execution contexts.
 - Direct agent runs and direct tool calls with cancellation support.
-- Label-based model routing with primary and fallback models.
+- Label-based model routing with a primary model.
 - Built-in model adapters for OpenAI-compatible APIs, Anthropic, and Gemini.
 - Object storage backed by the `object_store` ecosystem.
 - Persistent memory tools built on AndaDB, Cognitive Nexus, and KIP.
@@ -94,7 +94,7 @@ Context namespaces are derived from agent and tool names so cache and object sto
 
 ### Models
 
-`Models` is a thread-safe model registry. You can register concrete `Model` values under labels such as `primary`, `fallback`, `pro`, `flash`, or `lite`. Agents can route requests by label while applications remain free to change provider-specific model names.
+`Models` is a thread-safe model registry. You can register concrete `Model` values under labels such as `primary`, `pro`, `flash`, or `lite`. Agents can route requests by label while applications remain free to change provider-specific model names.
 
 Built-in provider adapters include:
 

@@ -499,15 +499,6 @@ impl EngineBuilder {
         self
     }
 
-    /// Sets a global fallback model.
-    ///
-    /// The fallback model will be used when the primary model returns an `AgentOutput`
-    /// with `failed_reason`.
-    pub fn with_fallback_model(self, model: Model) -> Self {
-        self.models.set_fallback_model(model);
-        self
-    }
-
     /// Sets the storage backend for the engine.
     pub fn with_store(mut self, store: Store) -> Self {
         self.store = store;
@@ -546,7 +537,7 @@ impl EngineBuilder {
     /// Registers a single agent with optional label to the engine.
     /// Verifies that all required tools are registered before adding the agent.
     /// Returns an error if any dependency is missing or if the agent cannot be added.
-    /// Recommended labels: "pro", "flash", "lite", "fallback"
+    /// Recommended labels: "pro", "flash", "lite"
     pub fn register_agent<T>(
         mut self,
         agent: Arc<T>,
