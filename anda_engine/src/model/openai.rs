@@ -41,6 +41,28 @@ fn is_json_null(value: &Json) -> bool {
     value.is_null()
 }
 
+fn json_value_to_string(value: Json) -> String {
+    match value {
+        Json::Null => String::new(),
+        Json::String(text) => text,
+        value => serde_json::to_string(&value).unwrap_or_default(),
+    }
+}
+
+fn deserialize_json_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(json_value_to_string(Json::deserialize(deserializer)?))
+}
+
+fn deserialize_optional_json_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Json>::deserialize(deserializer)?.map(json_value_to_string))
+}
+
 /// OpenAI API client for handling completions
 #[derive(Clone)]
 pub struct Client {
@@ -122,29 +144,29 @@ pub struct Usage {
     pub completion_tokens: usize,
     #[serde(default)]
     pub total_tokens: usize,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub prompt_tokens_details: PromptTokensDetails,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub completion_tokens_details: CompletionTokensDetails,
 }
 
 #[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct PromptTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub cached_tokens: usize,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub audio_tokens: usize,
 }
 
 #[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct CompletionTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub accepted_prediction_tokens: usize,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub audio_tokens: usize,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub reasoning_tokens: usize,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub rejected_prediction_tokens: usize,
 }
 
@@ -204,7 +226,7 @@ impl CompletionResponse {
         };
 
         let choice = self.choices.pop().ok_or("No completion choice")?;
-        if !matches!(choice.finish_reason.as_str(), "stop" | "tool_calls") {
+        if !is_success_finish_reason(&choice.finish_reason) {
             output.failed_reason = Some(choice.finish_reason);
         } else {
             output.raw_history.push(choice.message);
@@ -231,7 +253,7 @@ impl CompletionResponse {
 
     fn maybe_failed(&self) -> bool {
         !self.choices.iter().any(|choice| {
-            matches!(choice.finish_reason.as_str(), "stop" | "tool_calls")
+            is_success_finish_reason(&choice.finish_reason)
                 && choice
                     .parsed_message
                     .as_ref()
@@ -239,6 +261,13 @@ impl CompletionResponse {
                     .unwrap_or(false)
         })
     }
+}
+
+fn is_success_finish_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "stop" | "tool_calls" | "tool_call" | "function_call" | "tool_use"
+    )
 }
 
 /// Request body shape for OpenAI's Chat Completions API.
@@ -329,14 +358,53 @@ pub enum Verbosity {
     High,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceTier {
     Auto,
     Default,
     Flex,
     Scale,
     Priority,
+    Other(String),
+}
+
+impl ServiceTier {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Scale => "scale",
+            Self::Priority => "priority",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+}
+
+impl Serialize for ServiceTier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceTier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "auto" => Self::Auto,
+            "default" => Self::Default,
+            "flex" => Self::Flex,
+            "scale" => Self::Scale,
+            "priority" => Self::Priority,
+            _ => Self::Other(value),
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -886,7 +954,7 @@ struct ChatCompletionStreamDelta {
     content: Option<ChatCompletionStreamContent>,
     #[serde(default)]
     function_call: Option<FunctionCallDelta>,
-    #[serde(default)]
+    #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
     #[serde(default)]
     refusal: Option<String>,
@@ -905,7 +973,7 @@ enum ChatCompletionStreamContent {
 struct FunctionCallDelta {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_json_string")]
     arguments: Option<String>,
 }
 
@@ -913,7 +981,7 @@ struct FunctionCallDelta {
 struct CustomToolCallDelta {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_json_string")]
     input: Option<String>,
 }
 
@@ -1233,6 +1301,7 @@ pub struct ChatCompletionTopLogprob {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MessageOutput {
+    #[serde(default)]
     pub role: String,
 
     #[serde(default)]
@@ -1250,7 +1319,7 @@ pub struct MessageOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "reasoning")]
     pub reasoning_content: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1430,7 +1499,9 @@ pub struct ChatCompletionAudio {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolCallOutput {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub r#type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<Function>,
@@ -1472,12 +1543,14 @@ pub enum CustomToolFormat {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CustomToolCall {
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_json_string")]
     pub input: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Function {
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_json_string")]
     pub arguments: String,
 }
 
@@ -2342,6 +2415,70 @@ mod tests {
     }
 
     #[test]
+    fn deserializes_deepseek_chat_completion_compat_response_shapes() {
+        let mut response: CompletionResponse = serde_json::from_value(json!({
+            "id": "chatcmpl_deepseek_1",
+            "object": "chat.completion",
+            "created": 1777373352,
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Need a lookup before answering.",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": {"query": "anda"}
+                        }
+                    }]
+                },
+                "finish_reason": "tool_use"
+            }],
+            "service_tier": "economy",
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 7,
+                "total_tokens": 19,
+                "prompt_tokens_details": null,
+                "completion_tokens_details": null
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            response.service_tier,
+            Some(ServiceTier::Other(ref tier)) if tier == "economy"
+        ));
+
+        response.parse_output();
+        assert!(!response.maybe_failed());
+
+        let output = response.try_into(vec![], vec![]).unwrap();
+        assert_eq!(
+            output.thoughts.as_deref(),
+            Some("Need a lookup before answering.")
+        );
+        assert_eq!(output.tool_calls.len(), 1);
+        assert_eq!(output.tool_calls[0].name, "lookup");
+        assert_eq!(output.tool_calls[0].args, json!({"query": "anda"}));
+        assert_eq!(output.tool_calls[0].call_id.as_deref(), Some("call_1"));
+        assert_eq!(output.usage.input_tokens, 12);
+        assert_eq!(output.usage.output_tokens, 7);
+        assert_eq!(output.usage.cached_tokens, 0);
+        assert_eq!(
+            output.raw_history[0]["reasoning"],
+            "Need a lookup before answering."
+        );
+        assert_eq!(
+            output.raw_history[0]["tool_calls"][0]["function"]["arguments"],
+            json!({"query": "anda"})
+        );
+    }
+
+    #[test]
     fn aggregates_chat_completion_stream_chunks() {
         let chunks = vec![
             serde_json::from_value::<ChatCompletionStreamChunk>(json!({
@@ -2411,6 +2548,58 @@ mod tests {
         assert_eq!(output.tool_calls[0].args, json!({"q": "anda"}));
         assert_eq!(output.usage.input_tokens, 5);
         assert_eq!(output.usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn aggregates_deepseek_compat_chat_completion_stream_chunks() {
+        let chunks = vec![
+            serde_json::from_value::<ChatCompletionStreamChunk>(json!({
+                "id": "chatcmpl_stream_deepseek_1",
+                "object": "chat.completion.chunk",
+                "created": 1777373352,
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning": "Need lookup.",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_1",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": {"query": "anda"}
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_call"
+                }],
+                "service_tier": "economy",
+                "usage": {
+                    "prompt_tokens": 6,
+                    "completion_tokens": 4,
+                    "total_tokens": 10,
+                    "prompt_tokens_details": null,
+                    "completion_tokens_details": null
+                }
+            }))
+            .unwrap(),
+        ];
+
+        let response = chat_completion_response_from_stream_chunks(chunks).unwrap();
+        assert!(matches!(
+            response.service_tier,
+            Some(ServiceTier::Other(ref tier)) if tier == "economy"
+        ));
+        assert!(!response.maybe_failed());
+
+        let output = response.try_into(vec![], vec![]).unwrap();
+        assert_eq!(output.thoughts.as_deref(), Some("Need lookup."));
+        assert_eq!(output.tool_calls.len(), 1);
+        assert_eq!(output.tool_calls[0].name, "lookup");
+        assert_eq!(output.tool_calls[0].args, json!({"query": "anda"}));
+        assert_eq!(output.usage.input_tokens, 6);
+        assert_eq!(output.usage.output_tokens, 4);
     }
 
     #[test]

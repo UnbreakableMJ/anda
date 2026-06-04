@@ -2,6 +2,12 @@
 
 All notable changes to the Anda project will be documented in this file.
 
+## [0.12.29] — 2026-06-04
+
+### Changed — anda_engine v0.12.29
+
+- **Hardened OpenAI-compatible response parsing** — Chat Completions and Responses now tolerate DeepSeek-compatible variants: nullable usage detail objects and counters, unknown `service_tier` strings, `reasoning` aliases for reasoning content, `tool_call`/`tool_use`/`function_call` finish reasons, JSON object tool arguments/inputs, and missing message/tool-call role/type/id fields. Added tests for non-streaming and streaming compatibility shapes.
+
 ## [0.12.28] — 2026-06-04
 
 ### Changed — anda_engine v0.12.28

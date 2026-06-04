@@ -2655,24 +2655,29 @@ pub enum ToolChoiceAllowedMode {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResponsesUsage {
     /// Input tokens
+    #[serde(default, deserialize_with = "null_default")]
     pub input_tokens: u64,
     /// Output tokens
+    #[serde(default, deserialize_with = "null_default")]
     pub output_tokens: u64,
     /// Total tokens used (for a given prompt)
+    #[serde(default, deserialize_with = "null_default")]
     pub total_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub input_tokens_details: InputTokensDetails,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub output_tokens_details: OutputTokensDetails,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct InputTokensDetails {
+    #[serde(default, deserialize_with = "null_default")]
     pub cached_tokens: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OutputTokensDetails {
+    #[serde(default, deserialize_with = "null_default")]
     pub reasoning_tokens: u64,
 }
 
@@ -2803,8 +2808,7 @@ impl Default for Reasoning {
 }
 
 /// The billing service tier that will be used. On auto by default.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum OpenAIServiceTier {
     #[default]
     Auto,
@@ -2812,6 +2816,46 @@ pub enum OpenAIServiceTier {
     Flex,
     Scale,
     Priority,
+    Other(String),
+}
+
+impl OpenAIServiceTier {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Scale => "scale",
+            Self::Priority => "priority",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+}
+
+impl Serialize for OpenAIServiceTier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OpenAIServiceTier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "auto" => Self::Auto,
+            "default" => Self::Default,
+            "flex" => Self::Flex,
+            "scale" => Self::Scale,
+            "priority" => Self::Priority,
+            _ => Self::Other(value),
+        })
+    }
 }
 
 /// The amount of reasoning effort that will be used by a given model.
@@ -3408,6 +3452,36 @@ mod tests {
                 summary: None,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn deserializes_response_nullable_usage_details_and_unknown_service_tier() {
+        let response: CompletionResponse = serde_json::from_value(json!({
+            "id": "resp_compat_1",
+            "object": "response",
+            "created_at": 1741294021,
+            "status": "completed",
+            "model": "deepseek-v4-pro",
+            "output": [],
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 3,
+                "total_tokens": 8,
+                "input_tokens_details": null,
+                "output_tokens_details": null
+            },
+            "service_tier": "economy",
+            "metadata": {}
+        }))
+        .unwrap();
+
+        assert_eq!(response.usage.input_tokens, 5);
+        assert_eq!(response.usage.input_tokens_details.cached_tokens, 0);
+        assert_eq!(response.usage.output_tokens_details.reasoning_tokens, 0);
+        assert!(matches!(
+            response.additional_parameters.service_tier,
+            Some(OpenAIServiceTier::Other(ref tier)) if tier == "economy"
         ));
     }
 
